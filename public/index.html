@@ -46,7 +46,7 @@
     </div>
   </div>
 
-  <div class="conn" id="conn-box" title="数据源连接状态">
+  <div class="conn" id="conn-box" title="点击查看数据源状态" role="button" tabindex="0" aria-label="查看数据源状态">
     <span class="conn-dot" id="conn-dot" data-state="unknown"></span>
     <div class="conn-text">
       <span id="conn-label">连接中…</span>
@@ -54,6 +54,12 @@
     </div>
   </div>
 </header>
+
+<div class="source-banner" id="source-banner" hidden>
+  <span id="source-banner-text"></span>
+  <button type="button" class="link-btn" id="source-banner-details">查看详情</button>
+  <button type="button" class="icon-btn" id="source-banner-close" aria-label="关闭数据源提示">×</button>
+</div>
 
 <div class="margin-strip" id="margin-strip" hidden>
   <button type="button" class="margin-mode-badge" id="margin-mode-badge" title="点击切换保证金模式">逐仓</button>
@@ -104,6 +110,9 @@
           <strong class="num" id="quote-price">--</strong>
           <span class="num" id="quote-change">--</span>
           <span class="num change-pill" id="quote-change-pct">--</span>
+          <span class="quote-source-error" id="quote-source-error" hidden>数据源不可用
+            <button type="button" class="link-btn" id="quote-retry">重试</button>
+          </span>
         </div>
       </div>
       <div class="chart-controls">
@@ -134,7 +143,10 @@
     <div class="chart-body">
       <div class="chart-legend" id="chart-legend" hidden></div>
       <div class="chart-canvas" id="price-chart"></div>
-      <div class="chart-placeholder" id="chart-placeholder">正在加载行情数据…</div>
+      <div class="chart-placeholder" id="chart-placeholder">
+        <span id="chart-placeholder-text">正在加载行情数据…</span>
+        <button type="button" class="link-btn" id="chart-retry" hidden>重试</button>
+      </div>
     </div>
   </section>
 
@@ -643,6 +655,26 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="modal-sources" hidden>
+  <div class="modal modal-wide modal-sources" role="dialog" aria-modal="true" aria-labelledby="sources-title">
+    <div class="modal-head">
+      <h2 id="sources-title">数据源状态</h2>
+      <button type="button" class="icon-btn" data-close-modal="modal-sources" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint" id="source-summary">正在检查数据源…</p>
+      <div class="source-list" id="source-list"></div>
+      <div class="form-error" id="source-error" hidden></div>
+      <p class="settings-note" id="source-hint"></p>
+      <p class="settings-note" id="source-proxy-note" hidden>可在 <code>config.json</code> 的 <code>proxy</code> 修改代理地址；代理启动后点击「刷新」。</p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close-modal="modal-sources">关闭</button>
+      <button type="button" class="btn btn-primary" id="btn-source-refresh">刷新</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modal-help" hidden>
   <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="help-title">
     <div class="modal-head">
@@ -665,6 +697,13 @@
         <li><b>费率与滑点</b>：手续费、最低佣金、印花税、SEC 费等按账户生效，滑点 bps 影响市价成交估算；只影响之后的成交，可随时修改。</li>
         <li><b>保证金参数</b>：维持保证金率越低越晚强平但风险更高；借币年化利率逐小时计息；强平费率在强制平仓时收取。有持仓或挂单时这些风险参数会锁定。</li>
         <li>推荐保持默认值；提高倍率或降低 mmr 会放大风险，请自行控制仓位。</li>
+      </ul>
+      <h3 class="help-section-title">数据源异常怎么办</h3>
+      <ul class="help-notes">
+        <li>点击右上角连接状态（实时推送/轮询/离线）打开「数据源状态」，查看每个来源是否正常、延迟与影响市场。</li>
+        <li>境外源（Binance、CoinGecko、Yahoo 等）通常需要本机代理；代理不可用时加密行情、美股/外汇分钟线可能受影响，A股/港股/外汇报价和美股日线仍可用。</li>
+        <li>代理端口/地址在 <code>config.json</code> 的 <code>proxy</code> 修改；启动代理后回到「数据源状态」点「刷新」。</li>
+        <li>单个标的显示「数据源不可用」时，可点旁边「重试」重新拉取报价与 K 线。</li>
       </ul>
       <h3 class="help-section-title">术语速查</h3>
       <dl class="glossary">

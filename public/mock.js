@@ -637,6 +637,7 @@
         var parsed = JSON.parse(stored);
         if (parsed && parsed.version === 1 && parsed.accounts) {
           state = parsed;
+          if (!state.mockFailedSymbols || typeof state.mockFailedSymbols !== 'object') state.mockFailedSymbols = {};
           state.watchlist = (Array.isArray(state.watchlist) && state.watchlist.length
             ? state.watchlist
             : DEFAULT_WATCHLIST.slice())
@@ -669,7 +670,7 @@
         }
       } catch (e) { /* fall through to fresh state */ }
     }
-    state = { version: 1, accounts: {}, watchlist: DEFAULT_WATCHLIST.slice(), seq: 1 };
+    state = { version: 1, accounts: {}, watchlist: DEFAULT_WATCHLIST.slice(), seq: 1, mockFailedSymbols: {} };
     if (SEED) {
       var seeds = seedDemo();
       state.accounts[seeds.demo.id] = seeds.demo;
@@ -1582,10 +1583,13 @@
       return {
         ok: true, version: 'mock-1.0.0', uptimeSec: Math.round(performance.now() / 1000),
         serverTime: nowISO(),
+        hint: '加密行情不可用（本机代理未启动）；A股/港股/外汇报价正常，美股日线已走新浪直连备用',
         sources: [
-          { source: 'tencent', ok: true, latencyMs: 38, message: '' },
-          { source: 'binance', ok: true, latencyMs: 126, message: '' },
-          { source: 'yahoo', ok: true, latencyMs: 245, message: '' }
+          { source: 'tencent', ok: true, latencyMs: 38, message: '', critical: true, markets: ['cn', 'hk'] },
+          { source: 'tencent-fx', ok: true, latencyMs: 42, message: '', critical: true, markets: ['fx'] },
+          { source: 'binance', ok: false, latencyMs: null, message: '代理 127.0.0.1:65532 不可用，已尝试 data-api.binance.vision 直连但失败', hint: '加密行情受影响；启动代理后刷新', critical: true, markets: ['crypto'] },
+          { source: 'yahoo', ok: false, latencyMs: null, message: '代理未启动；美股日线已走新浪直连备用，美股/外汇分钟线不可用', hint: '美股日线仍可用，分钟线受影响', critical: false, markets: ['us', 'fx'] },
+          { source: 'sina', ok: true, latencyMs: 95, message: '美股日线直连备用正常', critical: false, markets: ['cn', 'us'] }
         ]
       };
     }
@@ -1627,7 +1631,12 @@
       var symbols = String(q.get('symbols') || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
       var out = { quotes: [], errors: [] };
       symbols.forEach(function (requested) {
-        var quote = quoteFor(normalizeSymbol(requested));
+        var canonical = normalizeSymbol(requested);
+        if (state.mockFailedSymbols && state.mockFailedSymbols[canonical]) {
+          out.errors.push({ symbol: requested, message: '数据源不可用（模拟）：上游连接失败' });
+          return;
+        }
+        var quote = quoteFor(canonical);
         if (quote) {
           quote.extra = extraFor(quote);
           out.quotes.push(quote);
@@ -1641,6 +1650,9 @@
 
     if (pathname === '/api/kline') {
       var symbol = normalizeSymbol(q.get('symbol'));
+      if (state.mockFailedSymbols && state.mockFailedSymbols[symbol]) {
+        fail(503, 'DATA_UNAVAILABLE', '数据源不可用（模拟）：上游连接失败');
+      }
       var interval = q.get('interval') || '1d';
       return { symbol: symbol, interval: interval, bars: barsFor(symbol, interval, q.get('limit')) };
     }
@@ -1938,6 +1950,16 @@
       return { ok: true, openedAt: openedPos.openedAt };
     }
 
+    if (pathname === '/api/dev/fail-symbol' && method === 'POST') {
+      var failSymbol = normalizeSymbol(body.symbol);
+      if (!CATALOG_MAP[failSymbol]) fail(400, 'BAD_REQUEST', '未知标的');
+      if (!state.mockFailedSymbols) state.mockFailedSymbols = {};
+      if (body.failed === false) delete state.mockFailedSymbols[failSymbol];
+      else state.mockFailedSymbols[failSymbol] = true;
+      saveState();
+      return { ok: true, symbol: failSymbol, failed: !!state.mockFailedSymbols[failSymbol] };
+    }
+
     fail(404, 'NOT_FOUND', '接口不存在：' + pathname);
   }
 
@@ -1974,6 +1996,10 @@
       var quotes = [];
       var errors = [];
       symbols.forEach(function (symbol) {
+        if (state.mockFailedSymbols && state.mockFailedSymbols[symbol]) {
+          errors.push({ symbol: symbol, message: '数据源不可用（模拟）：上游连接失败' });
+          return;
+        }
         var quote = quoteFor(symbol);
         if (quote) {
           quote.extra = extraFor(quote);

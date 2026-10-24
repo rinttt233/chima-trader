@@ -10,6 +10,7 @@
   var MOCK = window.MOCK === true;
   var REFRESH_MS = 2000;
   var HEALTH_MS = 15000;
+  var SOURCE_BANNER_MUTE_KEY = 'chimatrader.sourceBannerMutedUntil';
   var AUX_REFRESH_MS = 12000;
   var CURRENCY_SYMBOL = { CNY: '¥', HKD: 'HK$', USD: '$', USDT: '₮' };
   var MARKET_LABEL = { cn: 'A股', hk: '港股', us: '美股', fx: '外汇', crypto: '加密' };
@@ -124,6 +125,7 @@
     watchlist: [],
     quotes: {},
     quoteErrors: [],
+    quoteErrorMap: {},
     lastQuoteAt: null,
     lastQuoteError: null,
     accounts: [],
@@ -163,6 +165,8 @@
     auxLoadedAt: 0,
     health: null,
     healthCounter: 0,
+    sourceBannerMutedUntil: 0,
+    chartQuoteError: false,
     accountTickBusy: false,
     accountTimer: null,
     quotePollTimer: null,
@@ -1664,6 +1668,7 @@
 
       if (state.prefs.accountId) state.accountId = state.prefs.accountId;
       renderAll();
+      renderSourceBanner();
       await refreshAccounts();
       var initialSymbol = null;
       if (state.prefs.selectedSymbol && state.watchlist.indexOf(state.prefs.selectedSymbol) >= 0) {
@@ -1772,13 +1777,172 @@
     renderAll();
   }
 
+  var SOURCE_MARKET_FALLBACK = {
+    tencent: ['cn', 'hk'],
+    'tencent-fx': ['fx'],
+    binance: ['crypto'],
+    coingecko: ['crypto'],
+    yahoo: ['us', 'fx'],
+    sina: ['cn', 'us']
+  };
+  var CRITICAL_SOURCE_FALLBACK = { tencent: true, 'tencent-fx': true, binance: true, yahoo: true };
+
+  function quoteErrorFor(symbol) {
+    var key = normalizeSymbol(symbol || '');
+    return state.quoteErrorMap[key] || null;
+  }
+
+  function sourceNameOf(source) {
+    return (source && (source.source || source.name)) || 'unknown';
+  }
+
+  function sourceMarketsOf(source) {
+    if (source && Array.isArray(source.markets) && source.markets.length) return source.markets.slice();
+    if (source && typeof source.markets === 'string' && source.markets) return source.markets.split(',');
+    return SOURCE_MARKET_FALLBACK[sourceNameOf(source)] || [];
+  }
+
+  function sourceCriticalOf(source) {
+    if (source && typeof source.critical === 'boolean') return source.critical;
+    return !!CRITICAL_SOURCE_FALLBACK[sourceNameOf(source)];
+  }
+
+  function sourceMarketsLabel(source) {
+    var markets = sourceMarketsOf(source);
+    return markets.map(function (market) { return marketLabel(market); }).join('/');
+  }
+
+  function sourceShortMessage(source) {
+    if (!source) return '';
+    return String(source.hint || source.message || '').trim();
+  }
+
+  function sourceBannerMutedUntil() {
+    try {
+      var value = Number(localStorage.getItem(SOURCE_BANNER_MUTE_KEY));
+      return isFinite(value) ? value : 0;
+    } catch (e) { return state.sourceBannerMutedUntil || 0; }
+  }
+
+  function muteSourceBanner() {
+    state.sourceBannerMutedUntil = Date.now() + 10 * 60 * 1000;
+    try { localStorage.setItem(SOURCE_BANNER_MUTE_KEY, String(state.sourceBannerMutedUntil)); } catch (e) { /* ignore */ }
+    var banner = $('#source-banner');
+    if (banner) banner.hidden = true;
+  }
+
+  function renderSourceBanner() {
+    var banner = $('#source-banner');
+    if (!banner) return;
+    var health = state.health;
+    if (!health || !Array.isArray(health.sources)) {
+      banner.hidden = true;
+      return;
+    }
+    var failures = health.sources.filter(function (source) {
+      return source && source.ok === false && sourceCriticalOf(source);
+    });
+    if (!failures.length) {
+      banner.hidden = true;
+      return;
+    }
+    if (Date.now() < sourceBannerMutedUntil()) {
+      banner.hidden = true;
+      return;
+    }
+    var parts = failures.map(function (source) {
+      var markets = sourceMarketsLabel(source);
+      var message = sourceShortMessage(source);
+      return (markets ? markets + '行情' : '数据源') + (message ? '（' + message + '）' : '');
+    });
+    var text = '部分数据源不可用：' + (health.hint || parts.join('；'));
+    setText('#source-banner-text', text);
+    banner.hidden = false;
+  }
+
+  function sourceRowHTML(source) {
+    var ok = source && source.ok !== false;
+    var name = sourceNameOf(source);
+    var markets = sourceMarketsLabel(source);
+    var message = String((source && source.message) || '');
+    var hint = String((source && source.hint) || '');
+    var latency = source && source.latencyMs != null && isFinite(source.latencyMs) ? Math.round(source.latencyMs) + 'ms' : '--';
+    var critical = sourceCriticalOf(source);
+    return '<div class="source-row ' + (ok ? 'is-ok' : 'is-fail') + '">' +
+      '<span class="source-dot" data-state="' + (ok ? 'ok' : 'fail') + '"></span>' +
+      '<div class="source-main"><div class="source-line"><b>' + escapeHtml(name) + '</b>' +
+      '<span class="source-badge' + (critical ? '' : ' is-backup') + '">' + (critical ? '核心' : '备用') + '</span>' +
+      (markets ? '<span class="source-markets">影响：' + escapeHtml(markets) + '</span>' : '') +
+      '</div><div class="source-msg">' + escapeHtml(ok ? (message || '正常') : (message || '连接失败')) + '</div>' +
+      (hint ? '<div class="source-hint-line">' + escapeHtml(hint) + '</div>' : '') +
+      '</div><span class="source-lat ' + (ok ? 'is-ok' : 'is-fail') + '">' + escapeHtml(latency) + '</span></div>';
+  }
+
+  function sourceProxyRelated(failures) {
+    if (!failures.length) return false;
+    return failures.some(function (source) {
+      var name = sourceNameOf(source);
+      if (['binance', 'coingecko', 'yahoo'].indexOf(name) >= 0) return true;
+      var text = [source.message, source.hint, state.health && state.health.hint].join(' ');
+      return /代理|proxy/i.test(text);
+    });
+  }
+
+  function renderSourcesModal() {
+    var list = $('#source-list');
+    if (!list) return;
+    var health = state.health;
+    var errorEl = $('#source-error');
+    if (!health || !Array.isArray(health.sources)) {
+      list.innerHTML = '<div class="source-row is-fail"><span class="source-dot" data-state="fail"></span><div class="source-main"><div class="source-line"><b>数据源状态</b></div><div class="source-msg">' +
+        escapeHtml(state.lastHealthError || '暂时无法获取数据源状态，请稍后刷新') + '</div></div></div>';
+      setText('#source-summary', '数据源状态获取失败');
+      setText('#source-hint', '');
+      var proxyNote = $('#source-proxy-note');
+      if (proxyNote) proxyNote.hidden = true;
+      return;
+    }
+    var sources = health.sources || [];
+    var okCount = sources.filter(function (source) { return source.ok !== false; }).length;
+    var criticalFailures = sources.filter(function (source) { return source.ok === false && sourceCriticalOf(source); });
+    var summary = '共 ' + sources.length + ' 个来源，正常 ' + okCount + ' 个';
+    if (criticalFailures.length) summary += '，核心源异常 ' + criticalFailures.length + ' 个';
+    else if (sources.length > okCount) summary += '，部分备用源异常';
+    setText('#source-summary', summary + (health.serverTime ? ' · ' + fmtClock(Date.parse(health.serverTime)) : ''));
+    list.innerHTML = sources.map(sourceRowHTML).join('') || '<div class="source-msg">暂无数据源信息</div>';
+    setText('#source-hint', health.hint || '核心源异常时会影响对应市场的实时行情；可启动/修复本机代理后刷新。');
+    var proxyNote = $('#source-proxy-note');
+    if (proxyNote) proxyNote.hidden = !(sourceProxyRelated(criticalFailures) ||
+      sourceProxyRelated(sources.filter(function (source) { return source.ok === false; })));
+    if (errorEl) errorEl.hidden = true;
+  }
+
+  function openSourcesModal() {
+    openModal('modal-sources');
+    renderSourcesModal();
+    refreshHealth();
+  }
+
   async function refreshHealth() {
+    var btn = $('#btn-source-refresh');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '刷新中…';
+    }
     try {
       state.health = await api('/api/health');
+      state.lastHealthError = null;
     } catch (err) {
       state.health = null;
+      state.lastHealthError = errorText(err);
     }
     renderConnection();
+    renderSourceBanner();
+    if ($('#modal-sources') && !$('#modal-sources').hidden) renderSourcesModal();
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '刷新';
+    }
   }
 
   function startQuotePolling() {
@@ -1961,6 +2125,7 @@
 
   function applyQuotesFrame(quotes, errors) {
     var dirs = {};
+    var previousErrorKeys = Object.keys(state.quoteErrorMap).sort().join(',');
     (quotes || []).forEach(function (quote) {
       if (!quote || !quote.symbol) return;
       var prev = state.quotes[quote.symbol];
@@ -1971,8 +2136,25 @@
       state.quotes[quote.symbol] = quote;
     });
     state.quoteErrors = errors || [];
+    state.quoteErrorMap = {};
+    state.quoteErrors.forEach(function (error) {
+      if (!error) return;
+      var key = normalizeSymbol(error.symbol || '');
+      if (!key) return;
+      state.quoteErrorMap[key] = { message: error.message || '数据源不可用' };
+      delete state.quotes[key];
+    });
     state.lastQuoteAt = Date.now();
     state.stream.lastQuotesFrameAt = Date.now();
+    var selectedError = quoteErrorFor(state.selected);
+    if (selectedError) {
+      state.chartQuoteError = true;
+      setChartPlaceholder(sourceUnavailableText(selectedError.message), true);
+    } else if (state.chartQuoteError) {
+      state.chartQuoteError = false;
+      loadChart();
+    }
+    if (previousErrorKeys !== Object.keys(state.quoteErrorMap).sort().join(',')) renderWatchlist();
     updateLiveUI(dirs);
     renderConnection();
   }
@@ -3321,6 +3503,27 @@
     state.chart = window.Charts.createPriceChart(container, { onCrosshair: onChartCrosshair });
   }
 
+  function sourceUnavailableText(message) {
+    var text = String(message || '上游连接失败');
+    return /^数据源不可用/.test(text) ? text : '数据源不可用：' + text;
+  }
+
+  function setChartPlaceholder(message, retry) {
+    var placeholder = $('#chart-placeholder');
+    if (!placeholder) return;
+    placeholder.hidden = false;
+    setText('#chart-placeholder-text', message);
+    var btn = $('#chart-retry');
+    if (btn) btn.hidden = !retry;
+  }
+
+  function hideChartPlaceholder() {
+    var placeholder = $('#chart-placeholder');
+    if (placeholder) placeholder.hidden = true;
+    var btn = $('#chart-retry');
+    if (btn) btn.hidden = true;
+  }
+
   async function loadChart() {
     if (!state.selected || !window.Charts) return;
     ensurePriceChart();
@@ -3328,11 +3531,7 @@
     var token = ++state.chartToken;
     var symbol = state.selected;
     var interval = state.interval || '1d';
-    var placeholder = $('#chart-placeholder');
-    if (placeholder) {
-      placeholder.hidden = false;
-      placeholder.textContent = '正在加载行情数据…';
-    }
+    setChartPlaceholder('正在加载行情数据…', false);
     try {
       var res = await api('/api/kline?symbol=' + encodeURIComponent(symbol) +
         '&interval=' + encodeURIComponent(interval) + '&limit=300');
@@ -3348,17 +3547,43 @@
         interval: interval,
         precision: precision
       });
-      if (placeholder) placeholder.hidden = bars.length > 0;
-      if (!bars.length && placeholder) placeholder.textContent = '暂无 K 线数据';
+      if (bars.length) {
+        var quoteErr = quoteErrorFor(symbol);
+        if (quoteErr) setChartPlaceholder(sourceUnavailableText(quoteErr.message), true);
+        else hideChartPlaceholder();
+      } else {
+        setChartPlaceholder('暂无 K 线数据', false);
+      }
       renderChartLegend(null);
       if (currentQuote()) updateChartLive(currentQuote());
     } catch (err) {
       if (token !== state.chartToken) return;
       state.chartBars = [];
       state.chart.setData({ bars: [], mode: state.chartMode, interval: interval, precision: 2 });
-      if (placeholder) {
-        placeholder.hidden = false;
-        placeholder.textContent = 'K 线加载失败：' + errorText(err);
+      var message = quoteErrorFor(symbol) ? quoteErrorFor(symbol).message : errorText(err);
+      setChartPlaceholder(sourceUnavailableText(message), true);
+    }
+  }
+
+  async function retrySymbol(symbol) {
+    var target = normalizeSymbol(symbol || state.selected);
+    if (!target) return;
+    showToast('正在重试 ' + target + ' …', 'warn');
+    await refreshQuotes();
+    renderWatchlist();
+    if (target === state.selected) {
+      renderQuoteHeader();
+      renderQuoteStats();
+      renderOrderInfo();
+      var error = quoteErrorFor(target);
+      if (error) {
+        state.chartQuoteError = true;
+        setChartPlaceholder(sourceUnavailableText(error.message), true);
+        showToast('该标的数据源仍不可用：' + error.message, 'error');
+      } else {
+        state.chartQuoteError = false;
+        await loadChart();
+        showToast('已重新拉取行情', 'success');
       }
     }
   }
@@ -4754,6 +4979,7 @@
       dotState = 'err';
       titleParts.push('实时推送与轮询均不可用，将自动重试');
     }
+    titleParts.push('点击查看数据源状态');
     dot.dataset.state = dotState;
     label.textContent = labelText;
     if (timeEl) timeEl.textContent = lastFrame ? '最后帧 ' + fmtClock(lastFrame) : '等待行情…';
@@ -4766,17 +4992,23 @@
     var html = '';
     state.watchlist.forEach(function (symbol) {
       var quote = quoteOf(symbol);
+      var error = quoteErrorFor(symbol);
       var name = quote && quote.name ? quote.name : symbol;
       var code = displayCode(symbol, quote);
       var price = quote ? fmtPrice(quote.price, symbol) : '--';
       var changePct = quote && quote.changePct != null ? quote.changePct : null;
       var cls = pnlClass(changePct);
-      html += '<div class="watch-row' + (symbol === state.selected ? ' active' : '') + '" data-symbol="' +
+      var quoteHTML = error
+        ? '<div class="watch-quote-error"><span class="w-unavailable">数据源不可用</span>' +
+          '<button type="button" class="link-btn w-retry" data-retry-symbol="' + escapeHtml(symbol) + '">重试</button></div>'
+        : '<span class="w-price num ' + cls + '">' + price + '</span>' +
+          '<span class="w-pct num ' + cls + '">' + (changePct != null ? fmtPct(changePct) : '--') + '</span>';
+      html += '<div class="watch-row' + (symbol === state.selected ? ' active' : '') +
+        (error ? ' is-source-error' : '') + '" data-symbol="' +
         escapeHtml(symbol) + '" role="button" tabindex="0">' +
         '<div class="watch-name"><span class="w-name">' + escapeHtml(name) + '</span>' +
         '<span class="w-code">' + escapeHtml(code) + '</span></div>' +
-        '<div class="watch-quote"><span class="w-price num ' + cls + '">' + price + '</span>' +
-        '<span class="w-pct num ' + cls + '">' + (changePct != null ? fmtPct(changePct) : '--') + '</span></div>' +
+        '<div class="watch-quote">' + quoteHTML + '</div>' +
         '<button type="button" class="w-del" data-del-symbol="' + escapeHtml(symbol) + '" title="删除自选" aria-label="删除自选">×</button>' +
         '</div>';
     });
@@ -4798,31 +5030,52 @@
     var quote = currentQuote();
     var nameEl = $('#quote-name');
     if (!nameEl) return;
-    if (!quote) {
-      setText('#quote-name', state.selected ? state.selected : '--');
-      setText('#quote-code', '--');
+    var quoteError = quoteErrorFor(state.selected);
+    var sourceErrorEl = $('#quote-source-error');
+    var changeEl = $('#quote-change');
+    var pctEl = $('#quote-change-pct');
+    var priceEl = $('#quote-price');
+    if (!quote || quoteError) {
+      setText('#quote-name', quote ? (quote.name || state.selected) : state.selected || '--');
+      setText('#quote-code', quote ? displayCode(quote.symbol, quote) : '--');
       setText('#quote-market', state.selected ? marketLabel(marketOf(state.selected)) : '--');
-      setText('#quote-price', '--');
-      setText('#quote-change', '--');
-      var pctEl = $('#quote-change-pct');
-      pctEl.textContent = '--';
-      pctEl.className = 'num change-pill flat';
+      if (quoteError) {
+        priceEl.hidden = true;
+        changeEl.hidden = true;
+        pctEl.hidden = true;
+        if (sourceErrorEl) {
+          sourceErrorEl.hidden = false;
+          sourceErrorEl.title = quoteError.message;
+        }
+      } else {
+        priceEl.hidden = false;
+        changeEl.hidden = false;
+        pctEl.hidden = false;
+        if (sourceErrorEl) sourceErrorEl.hidden = true;
+        priceEl.textContent = '--';
+        priceEl.className = 'num flat';
+        changeEl.textContent = '--';
+        changeEl.className = 'num flat';
+        pctEl.textContent = '--';
+        pctEl.className = 'num change-pill flat';
+      }
       var staleEl = $('#quote-stale');
       if (staleEl) staleEl.hidden = true;
       return;
     }
+    priceEl.hidden = false;
+    changeEl.hidden = false;
+    pctEl.hidden = false;
+    if (sourceErrorEl) sourceErrorEl.hidden = true;
     setText('#quote-name', quote.name || state.selected);
     setText('#quote-code', displayCode(quote.symbol, quote));
     setText('#quote-market', marketLabel(quote.market));
-    var priceEl = $('#quote-price');
     priceEl.textContent = fmtPrice(quote.price, quote.symbol);
     priceEl.className = 'num ' + pnlClass(quote.change);
-    var changeEl = $('#quote-change');
     changeEl.textContent = (quote.change > 0 ? '+' : '') + fmtPrice(quote.change, quote.symbol);
     changeEl.className = 'num ' + pnlClass(quote.change);
-    var pctEl2 = $('#quote-change-pct');
-    pctEl2.textContent = fmtPct(quote.changePct);
-    pctEl2.className = 'num change-pill ' + pnlClass(quote.changePct);
+    pctEl.textContent = fmtPct(quote.changePct);
+    pctEl.className = 'num change-pill ' + pnlClass(quote.changePct);
     var stale = $('#quote-stale');
     if (stale) stale.hidden = !quote.stale;
   }
@@ -5662,6 +5915,12 @@
     });
 
     on($('#watch-list'), 'click', function (event) {
+      var retry = event.target.closest('[data-retry-symbol]');
+      if (retry) {
+        event.stopPropagation();
+        retrySymbol(retry.getAttribute('data-retry-symbol'));
+        return;
+      }
       var del = event.target.closest('[data-del-symbol]');
       if (del) {
         event.stopPropagation();
@@ -5678,6 +5937,18 @@
     });
     on($('#btn-refresh-watch'), 'click', pollNow);
     on($('#btn-chart-refresh'), 'click', function () { loadChart(); });
+    on($('#conn-box'), 'click', openSourcesModal);
+    on($('#conn-box'), 'keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openSourcesModal();
+      }
+    });
+    on($('#source-banner-details'), 'click', openSourcesModal);
+    on($('#source-banner-close'), 'click', muteSourceBanner);
+    on($('#btn-source-refresh'), 'click', refreshHealth);
+    on($('#quote-retry'), 'click', function () { retrySymbol(state.selected); });
+    on($('#chart-retry'), 'click', function () { retrySymbol(state.selected); });
 
     on($('#interval-group'), 'click', function (event) {
       var btn = event.target.closest('[data-interval]');
@@ -5757,6 +6028,7 @@
       if (!$('#modal-margin-mode').hidden) { closeModal('modal-margin-mode'); return; }
       if (!$('#modal-import').hidden) { closeModal('modal-import'); return; }
       if (!$('#modal-data').hidden) { closeModal('modal-data'); return; }
+      if (!$('#modal-sources').hidden) { closeModal('modal-sources'); return; }
       if (!$('#modal-help').hidden) { closeModal('modal-help'); return; }
       closeSearch();
       if (state.confirmResolve) { resolveConfirm(false); return; }

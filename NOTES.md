@@ -158,6 +158,18 @@
 2. **没有改名入口**：`PATCH /api/accounts/:id` 之前只处理 `marginMode`，用户想改账户名无路可走（传 name 还会报 `MARGIN_MODE_INVALID`）。现在支持 `{name?, marginMode?}`（name 1–20 字符，随时可改；有持仓不影响改名）。
    - 写 API 时「可选字段」要显式处理：`if (body.name !== undefined)`，否则空 patch 会误报；空 patch 现在返回 `NOTHING_TO_UPDATE`。
 
+## 16. 「数据源异常」的排查与直连兜底（v1.2.2）
+
+- 症状：页头显示数据源异常、加密报价报错、美股 K 线 503。先看 `/api/health` 每条 source 的中文 message。
+- 根因通常是**本机代理未启动**（`config.json` 里 `127.0.0.1:65532` 连接被拒），不是代码 bug。实测代理关闭时：binance/coingecko/yahoo 全挂；腾讯/新浪/外汇报价正常。
+- 但境外源并非只能靠代理，两个关键发现：
+  1. **Binance 有公网直连数据域名 `data-api.binance.vision`**，`/api/v3/ticker/24hr`、`/klines`、`/exchangeInfo` 全支持且格式一致 → 加密报价与 K 线无代理也可用；
+  2. **新浪美股日线直连可用**：`US_MinKService.getDailyK?symbol=<SYM>` 返回全历史 `d/o/h/l/c/v`（每只约 550KB，必须 trim）→ 美股日/周/月线可兜底，周/月本地聚合。
+- 因此健康状态要区分「核心源」与「备用源」（`critical` 字段），前端只在核心源失败时提示黄条；备用源（CoinGecko/Yahoo）失败不影响主流程。
+- 仍然依赖代理的只有**美股/外汇分钟线**（Yahoo），这部分在代理不可用时应从 `/api/markets` 的 intervals 移除，而不是返回一堆 503。
+- 产品教训：**“数据源异常”这种聚合状态必须能点开看明细**（哪个源、影响哪个市场、怎么修），否则用户只能来问；同时能给直连兜底的源应尽量兜底，而不是直接报错。
+
+
 
 
 

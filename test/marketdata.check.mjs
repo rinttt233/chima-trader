@@ -16,10 +16,11 @@ import {
   getMarkets,
   getMarketMeta,
   health,
+  _resetCacheForTest,
   MarketDataError,
 } from '../lib/marketdata.mjs';
 import { parseSymbol } from '../lib/symbols.mjs';
-import { probeProxy } from '../lib/net.mjs';
+import { probeProxy, configureProxy } from '../lib/net.mjs';
 import { CRYPTO_STABLECOIN_BASES } from '../lib/sources/universe.mjs';
 
 const startedAt = Date.now();
@@ -141,8 +142,15 @@ async function main() {
       assert(typeof entry.ok === 'boolean', `health(${entry.source}) ok 不是布尔值`);
       assert(entry.latencyMs === null || Number.isFinite(entry.latencyMs), `health(${entry.source}) latencyMs 非法`);
       assert(typeof entry.message === 'string' && entry.message.length > 0, `health(${entry.source}) 缺少中文说明`);
+      const expectedCritical = ['tencent', 'tencent-fx', 'binance', 'sina'].includes(entry.source);
+      assert(entry.critical === expectedCritical, `health(${entry.source}) critical 应为 ${expectedCritical}`);
+      assert(
+        Array.isArray(entry.markets) && entry.markets.every((market) => ['cn', 'hk', 'us', 'fx', 'crypto'].includes(market)),
+        `health(${entry.source}) markets 非法`,
+      );
+      assert(typeof entry.hint === 'string' && entry.hint.length > 0, `health(${entry.source}) 缺少 hint`);
     }
-    return `共 ${healthEntries.length} 个数据源`;
+    return `共 ${healthEntries.length} 个数据源（含 critical/markets/hint）`;
   });
   const healthBySource = Object.fromEntries(healthEntries.map((entry) => [entry.source, entry]));
   for (const source of ['tencent', 'tencent-fx', 'binance', 'coingecko', 'yahoo', 'sina']) {
@@ -151,7 +159,7 @@ async function main() {
       assert(entry, `health() 缺少 ${source} 条目`);
       assert(entry.ok, entry.message);
       return entry.message;
-    }, { optional: source === 'binance' || source === 'coingecko' || source === 'yahoo' || source === 'sina' });
+    }, { optional: source === 'coingecko' || source === 'yahoo' || source === 'sina' });
   }
   const tencentOk = healthBySource.tencent?.ok === true;
   const yahooOk = healthBySource.yahoo?.ok === true;
@@ -533,6 +541,72 @@ async function main() {
     assert(error instanceof MarketDataError && error.code === 'SYMBOL_INVALID', '非法 symbol 未返回 SYMBOL_INVALID');
     assert(error.status === 400, '非法 symbol 状态码不为 400');
     return error.message;
+  });
+  console.log('');
+
+  // ---- proxy off: direct fallbacks -----------------------------------------
+  console.log('== 代理关闭兜底 (proxy off) ==');
+  configureProxy({ host: '127.0.0.1', port: 1 }); // simulate an unavailable local proxy
+  _resetCacheForTest();
+  const offlineHealth = await health();
+  const offlineBySource = Object.fromEntries(offlineHealth.map((entry) => [entry.source, entry]));
+  await check('[proxy-off] health 直连兜底说明', async () => {
+    for (const entry of offlineHealth) {
+      assert(typeof entry.critical === 'boolean', `health(${entry.source}) 缺少 critical`);
+      assert(Array.isArray(entry.markets), `health(${entry.source}) 缺少 markets`);
+      assert(typeof entry.hint === 'string' && entry.hint.length > 0, `health(${entry.source}) 缺少 hint`);
+    }
+    const binanceEntry = offlineBySource.binance;
+    assert(binanceEntry?.ok === true, `代理离线时 binance 应可用（vision 直连）：${binanceEntry?.message}`);
+    assert(
+      String(binanceEntry.message).includes('vision'),
+      `binance 消息未说明使用 vision：${binanceEntry.message}`,
+    );
+    const yahooEntry = offlineBySource.yahoo;
+    assert(yahooEntry?.ok === false, '代理离线时 yahoo 应不可用');
+    assert(
+      /新浪|日\/周\/月线/.test(String(yahooEntry.message)),
+      `yahoo 消息未说明新浪兜底：${yahooEntry.message}`,
+    );
+    return `binance=${binanceEntry.message}；yahoo=${yahooEntry.message}`;
+  });
+  await check('[proxy-off] crypto 报价（data-api.binance.vision）', async () => {
+    const result = await getQuotes(['crypto:BTCUSDT', 'crypto:ETHUSDT']);
+    assert(result.quotes.length === 2 && result.errors.length === 0, `报价失败：${JSON.stringify(result.errors)}`);
+    for (const quote of result.quotes) {
+      assert(Number.isFinite(quote.price) && quote.price > 0, `价格非法：${quote.price}`);
+    }
+    return result.quotes.map((quote) => `${quote.symbol}=${quote.price}`).join('，');
+  });
+  for (const interval of ['1d', '1h', '1m']) {
+    await check(`[proxy-off] crypto ${interval} K（data-api.binance.vision）`, async () => {
+      const result = await getKline('crypto:BTCUSDT', interval, 20);
+      validateBars(result.bars, `crypto ${interval}`);
+      return `${result.bars.length} 根，最新 ${result.bars[result.bars.length - 1].t}`;
+    });
+  }
+  for (const interval of ['1d', '1w', '1M']) {
+    await check(`[proxy-off] us ${interval} K（新浪日线兜底）`, async () => {
+      const result = await getKline('us:usAAPL', interval, 20);
+      validateBars(result.bars, `us ${interval}`);
+      const last = result.bars[result.bars.length - 1];
+      return `${result.bars.length} 根，最新 ${last.t.slice(0, 10)} 收 ${last.c}`;
+    });
+  }
+  await check('[proxy-off] /api/markets 移除 us/fx 分钟周期', async () => {
+    const markets = await getMarkets();
+    const byId = Object.fromEntries(markets.map((market) => [market.id, market]));
+    const minuteIntervals = ['1m', '5m', '15m', '30m', '60m'];
+    for (const market of ['us', 'fx']) {
+      const leaked = byId[market].intervals.filter((interval) => minuteIntervals.includes(interval));
+      assert(leaked.length === 0, `${market} 仍包含分钟周期：${leaked.join(',')}`);
+      assert(byId[market].intervals.includes('1d'), `${market} 丢失日线周期`);
+    }
+    assert(
+      byId.crypto.intervals.includes('1h') && byId.crypto.intervals.includes('1m'),
+      'crypto 周期不应受影响',
+    );
+    return `us=${byId.us.intervals.join(' ')}；fx=${byId.fx.intervals.join(' ')}；crypto=${byId.crypto.intervals.join(' ')}`;
   });
   console.log('');
 

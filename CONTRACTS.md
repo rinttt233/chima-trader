@@ -130,12 +130,18 @@ export async function getUniverse(market, options) // -> { items:[{symbol,code,n
 export async function getFxRates()          // -> { CNY:1, USD:number, HKD:number, USDT:number }
 export async function getMarkets()          // -> MARKET_META[]（含 intervals、sessions、可交易性）
 export function getMarketMeta(market)       // -> 单个 market 元数据
-export async function health()              // -> [{ source, ok, latencyMs, message }]
+export async function health()              // -> [{ source, ok, latencyMs, message, critical?, markets?, hint? }]
 ```
+
+- `health()` 每条来源额外可选返回：`critical`（是否核心源；备用源如 CoinGecko/Yahoo 可为 false）、`markets`（受影响市场 `cn/hk/us/fx/crypto` 数组）、`hint`（一句话中文处置建议）。前端据此决定是否弹「部分数据源不可用」横幅与状态弹层。
+- **境外源必须有直连兜底**（用户本机代理未开启时仍可用）：
+  - Binance：主站 `api.binance.com`（代理）失败时改用 **`https://data-api.binance.vision`**（公网直连，支持 ticker/klines/exchangeInfo，返回格式一致），health 里标明当前入口；
+  - 美股日/周/月 K 线：Yahoo（代理）失败时改用新浪美股日线 `https://stock.finance.sina.com.cn/usstock/api/json_v2.php/US_MinKService.getDailyK?symbol=<SYM>`（直连，字段 `d/o/h/l/c/v`，按 limit 截断），周/月由日线本地聚合；
+  - 美股/外汇**分钟线**仍只依赖 Yahoo，代理不可用时从 `/api/markets` 的 intervals 中移除并在 health 说明。
 
 - `getQuotes` 必须**批量**：多 symbol 一次请求拿回，单次调用内部最多 2 个网络请求（腾讯批量 + Binance 批量）。
 - 所有网络请求带 5s 超时、2 次重试、TTL 缓存（quotes 800ms，kline 依周期 5s~5min，fxRates 30s，markets 静态）。
-- 国内源（腾讯）**直连**；境外源（Binance/CoinGecko/Yahoo）走 `config.json` 里的本地代理隧道，失败自动降级并标记 `health`。
+- 国内源（腾讯/新浪/Nasdaq？）直连；境外源优先 `config.json` 的本地代理，失败自动切直连兜底并标记 `health`。
 
 ---
 

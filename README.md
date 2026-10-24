@@ -15,7 +15,7 @@
 
 ![主界面](docs/screenshot.png)
 
-> 更多界面：新手引导 [docs/onboarding.png](docs/onboarding.png) ｜ 全市场标的库 [docs/universe.png](docs/universe.png) ｜ 杠杆与风险预警 [docs/risk.png](docs/risk.png) ｜ 账户参数设置 [docs/account-settings.png](docs/account-settings.png) ｜ 数据管理 [docs/backup.png](docs/backup.png)
+> 更多界面：新手引导 [docs/onboarding.png](docs/onboarding.png) ｜ 全市场标的库 [docs/universe.png](docs/universe.png) ｜ 杠杆与风险预警 [docs/risk.png](docs/risk.png) ｜ 账户参数设置 [docs/account-settings.png](docs/account-settings.png) ｜ 数据管理 [docs/backup.png](docs/backup.png) ｜ 数据源状态 [docs/data-source-status.png](docs/data-source-status.png)
 
 ```
 双击 start.cmd            # Windows 一键启动（自动打开浏览器）
@@ -84,25 +84,39 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 |---|---|---|
 | A 股 | 腾讯行情 `qt.gtimg.cn` / `ifzq.gtimg.cn` | 直连，实时报价 + 五档 + 分钟/日/周/月线 |
 | 港股 | 腾讯行情 | 直连；分钟线由最近一个交易日的分时数据聚合 |
-| 美股 | 腾讯行情（报价）+ Yahoo（K 线） | 报价直连；日/周/月与分钟 K 线走 Yahoo，需要代理 |
+| 美股 | 腾讯（报价）+ Yahoo（K 线）+ **新浪美股日线（直连兜底）** | 报价直连；Yahoo 不可用时日/周/月线自动改走新浪直连，分钟线仍需代理 |
 | 外汇 | 腾讯行情 `wh*` | 直连，12 个货币对；EURJPY/GBPJPY 报价停更会在健康状态里标注 |
 | 伦敦金/银 | 腾讯报价 `hf_XAU`/`hf_XAG` + 新浪现货日线 | 日线国内直连；分钟线走 Yahoo 期货，与现货有约 0.2% 基差 |
-| 加密 | Binance 公共行情（CoinGecko 兜底） | **需要本机代理** |
+| 加密 | Binance（`api.binance.com` 代理）+ **`data-api.binance.vision` 直连兜底** | 主站不可用时自动切公网直连数据域名，报价/K线都可用；CoinGecko 兜底 |
 
 所有行情都来自公开只读接口，不需要注册、不需要 API Key。采集失败自动降级为缓存并标记过期，页面不会崩。
 
 「标的库」的全市场列表来源：A股/港股 = 新浪排行接口（国内直连，分页拉全市场），美股 = Nasdaq screener（Yahoo 兜底），加密 = Binance 全量 700+ 个 USDT 交易对，外汇 = 12 个货币对 + 金银。任何源不可用时回退到内置精选列表并在列表顶部说明原因。
 
+### 数据源异常排查
+
+页头右上角的状态点点击可打开「数据源状态」，逐个列出每个源是否正常、延迟、失败原因与**受影响的市场**。常见情况：
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 加密行情不可用 / `binance` 显示失败 | 本机代理未启动，且直连备用域名也不可达 | 启动代理；或在 `config.json` 改代理端口。正常时会自动走 `data-api.binance.vision` |
+| 美股只有报价、K 线空 | Yahoo 被代理拦截/限流 | 日/周/月线会自动走新浪直连；分钟线需代理恢复 |
+| `yahoo` 失败但其它正常 | 分钟线依赖 Yahoo，代理不可用 | 不影响 A 股/港股/外汇/美股日线 |
+| `tencent` 失败 | 国内网络/DNS 异常 | 检查网络后点「刷新」；通常几秒恢复 |
+| EURJPY/GBPJPY 报价停更 | 腾讯源本身停更（数据源问题） | 换用其它货币对；health 会标注 |
+
+> 程序不会自己启动代理，只复用 `config.json` 的 `proxy`。代理关掉时：A 股/港股/外汇/美股日线/加密（直连兜底）仍可用，只有**美股与外汇的分钟线**会缺失。
+
 ### 代理设置
 
-加密行情、美股 K 线需要访问境外网络。程序不会自己起代理，而是复用 `config.json` 里配置的本地 HTTP 代理：
+加密行情主站、美股分钟线需要访问境外网络。程序不会自己起代理，而是复用 `config.json` 里配置的本地 HTTP 代理：
 
 ```json
 "proxy": { "enabled": true, "host": "127.0.0.1", "port": 65532,
            "hosts": ["api.binance.com", "api.coingecko.com", "query1.finance.yahoo.com"] }
 ```
 
-默认值取自开发机的系统代理（127.0.0.1:65532）。你的代理端口不同就改成自己的；不需要境外数据源可以把 `enabled` 设为 `false`（此时加密行情不可用，A股/港股/外汇不受影响）。
+默认值取自开发机的系统代理（127.0.0.1:65532）。你的代理端口不同就改成自己的；不需要境外数据源可以把 `enabled` 设为 `false`（此时加密行情会自动尝试直连兜底，A股/港股/外汇不受影响）。
 
 页头右上角的「数据源正常」点进去可以看到每个源的实时健康状态（含延迟与中文原因）。
 
