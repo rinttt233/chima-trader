@@ -664,11 +664,14 @@ test('invalid symbols, quantities and order types are rejected', () => {
 test('portfolioView folds multi-currency cash and positions into CNY', () => {
   const account = makeAccount({ initialCapital: 100000 });
   account.cash = { CNY: 100000, HKD: 50000, USD: 10000, USDT: 0 };
+  // Positions opened on a previous day (overnight) so todayPnl is measured from
+  // prevClose; the intraday-basis rule is covered by dedicated tests below.
+  const OVERNIGHT_OPENED_AT = '2026-10-22T09:30:00+08:00';
   account.positions = {
-    'cn:sh600519': { symbol: 'cn:sh600519', market: 'cn', name: '贵州茅台', currency: 'CNY', qty: 100, avgCost: 100, todayBuyQty: 0, todayBuyDate: null, openedAt: NOW_FRI },
-    'hk:hk00700': { symbol: 'hk:hk00700', market: 'hk', name: '腾讯控股', currency: 'HKD', qty: 100, avgCost: 300, todayBuyQty: 0, todayBuyDate: null, openedAt: NOW_FRI },
-    'us:usAAPL': { symbol: 'us:usAAPL', market: 'us', name: '苹果', currency: 'USD', qty: 10, avgCost: 200, todayBuyQty: 0, todayBuyDate: null, openedAt: NOW_FRI },
-    'crypto:BTCUSDT': { symbol: 'crypto:BTCUSDT', market: 'crypto', name: '比特币', currency: 'USDT', qty: 0.1, avgCost: 60000, todayBuyQty: 0, todayBuyDate: null, openedAt: NOW_FRI }
+    'cn:sh600519': { symbol: 'cn:sh600519', market: 'cn', name: '贵州茅台', currency: 'CNY', qty: 100, avgCost: 100, todayBuyQty: 0, todayBuyDate: null, openedAt: OVERNIGHT_OPENED_AT },
+    'hk:hk00700': { symbol: 'hk:hk00700', market: 'hk', name: '腾讯控股', currency: 'HKD', qty: 100, avgCost: 300, todayBuyQty: 0, todayBuyDate: null, openedAt: OVERNIGHT_OPENED_AT },
+    'us:usAAPL': { symbol: 'us:usAAPL', market: 'us', name: '苹果', currency: 'USD', qty: 10, avgCost: 200, todayBuyQty: 0, todayBuyDate: null, openedAt: OVERNIGHT_OPENED_AT },
+    'crypto:BTCUSDT': { symbol: 'crypto:BTCUSDT', market: 'crypto', name: '比特币', currency: 'USDT', qty: 0.1, avgCost: 60000, todayBuyQty: 0, todayBuyDate: null, openedAt: OVERNIGHT_OPENED_AT }
   };
   account.dayStartEquity = 300000;
   const quotes = {
@@ -993,7 +996,8 @@ test('crypto 10x short opens a short position with borrowed debt', () => {
   const positionView = view.positions[0];
   assert.equal(positionView.side, 'short');
   assert.equal(positionView.unrealizedPnl, -1.8); // (59982 - 60000) * 0.1
-  assert.equal(positionView.todayPnl, -50); // (prevClose 59500 - 60000) * 0.1
+  // opened today, so todayPnl uses the entry price (equals the unrealised PnL)
+  assert.equal(positionView.todayPnl, -1.8);
   const expectedLiq = (59982 * 0.1 + 599.82) / (0.1 * 1.005);
   assert.ok(Math.abs(positionView.liqPrice - expectedLiq) < 0.02);
 });
@@ -1692,4 +1696,88 @@ test('portfolioView 5th cfg argument drives liqPrice/riskRatio (v3)', () => {
   assert.equal(high.maintenanceMargin, 300);
   assert.equal(low.riskRatio, 0.0501);
   assert.equal(high.riskRatio, 0.5014);
+});
+
+// ===========================================================================
+// v1.1.1: per-position todayPnl baseline (§6.5)
+// ===========================================================================
+
+const YESTERDAY = '2026-10-22T10:00:00+08:00';
+
+function overnightPosition(overrides = {}) {
+  return {
+    symbol: 'crypto:BTCUSDT',
+    market: 'crypto',
+    name: '比特币',
+    currency: 'USDT',
+    side: 'long',
+    qty: 0.1,
+    avgCost: 60018,
+    leverage: 10,
+    margin: 600.18,
+    debt: 5401.62,
+    accruedInterest: 0,
+    interestAnnual: 0.08,
+    lastInterestAt: YESTERDAY,
+    takeProfit: null,
+    stopLoss: null,
+    openedAt: YESTERDAY,
+    todayBuyQty: 0,
+    todayBuyDate: '2026-10-22',
+    ...overrides
+  };
+}
+
+test('portfolioView: a position opened today measures todayPnl from its entry price', () => {
+  const account = leveragedAccount();
+  openCrypto10x(account); // filled at 60018 on NOW_FRI
+  const openedAt = account.positions['crypto:BTCUSDT'].openedAt;
+  assert.equal(dayKeyOf(openedAt), dayKeyOf(NOW_FRI)); // same Asia/Shanghai day
+
+  const quotes = { 'crypto:BTCUSDT': cryptoQuote({ price: 60100, prevClose: 59500 }) };
+  const view = portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG);
+  const position = view.positions[0];
+  assert.equal(position.todayPnl, 8.2); // (60100 - 60018) * 0.1, entry-based
+  assert.equal(position.todayPnl, position.unrealizedPnl); // same-day entry -> equals mark-to-market
+  const overnightBasis = round2((60100 - 59500) * 0.1);
+  assert.equal(overnightBasis, 60); // the old（错误）口径会给出 60
+  assert.notEqual(position.todayPnl, overnightBasis);
+  // the account-level todayPnl stays equity - dayStartEquity
+  assert.equal(view.todayPnl, round2(view.equity.total - view.dayStartEquity));
+});
+
+test('portfolioView: an overnight position measures todayPnl from prevClose', () => {
+  const account = leveragedAccount();
+  account.positions['crypto:BTCUSDT'] = overnightPosition();
+  const quotes = { 'crypto:BTCUSDT': cryptoQuote({ price: 60100, prevClose: 59500 }) };
+  const position = portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG).positions[0];
+  assert.equal(position.todayPnl, 60); // (60100 - 59500) * 0.1
+  assert.equal(position.unrealizedPnl, 8.2); // (60100 - 60018) * 0.1
+
+  // a missing or invalid openedAt is treated as an overnight position as well
+  delete account.positions['crypto:BTCUSDT'].openedAt;
+  assert.equal(portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG).positions[0].todayPnl, 60);
+  account.positions['crypto:BTCUSDT'].openedAt = 'not-a-date';
+  assert.equal(portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG).positions[0].todayPnl, 60);
+
+  // a missing prevClose falls back to lastPrice, so there is no day move to report
+  const noPrev = { 'crypto:BTCUSDT': cryptoQuote({ price: 60100, prevClose: null }) };
+  assert.equal(portfolioView(account, noPrev, RATES_ONE, NOW_FRI, CFG).positions[0].todayPnl, 0);
+});
+
+test('portfolioView: a short opened today measures todayPnl from its entry price', () => {
+  const account = leveragedAccount();
+  openCrypto10x(account, {}, { side: 'sell' }); // filled at 59982 on NOW_FRI
+  const quotes = { 'crypto:BTCUSDT': cryptoQuote({ price: 59900, prevClose: 59500 }) };
+  const position = portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG).positions[0];
+  assert.equal(position.side, 'short');
+  assert.equal(position.todayPnl, 8.2); // (59982 - 59900) * 0.1
+  assert.equal(position.todayPnl, position.unrealizedPnl);
+  assert.notEqual(position.todayPnl, round2((59500 - 59900) * 0.1)); // not the old -40
+
+  // the same short held overnight uses prevClose: (prevClose - last) * qty
+  const overnightAccount = leveragedAccount();
+  overnightAccount.positions['crypto:BTCUSDT'] = overnightPosition({ side: 'short', avgCost: 59982, margin: 599.82, debt: 5398.38 });
+  const overnightView = portfolioView(overnightAccount, quotes, RATES_ONE, NOW_FRI, CFG);
+  assert.equal(overnightView.positions[0].todayPnl, -40); // (59500 - 59900) * 0.1
 });

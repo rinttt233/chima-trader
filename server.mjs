@@ -581,6 +581,121 @@ function stopStreamLoop() {
   }
 }
 
+// ---------------------------------------------------------------- local backups
+
+const STATE_PATH = path.join(DATA_DIR, 'state.json');
+const BACKUP_DIR = path.join(DATA_DIR, 'backups');
+const BACKUP_CFG = CONFIG.backup || {};
+const BACKUP_KEEP = Math.max(1, Number(BACKUP_CFG.keep) || 20);
+const BACKUP_AUTO_MINUTES = Math.max(0, Number(BACKUP_CFG.autoMinutes) || 0);
+let lastAutoSnapshotAt = 0;
+
+function backupStamp(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(date).reduce((acc, part) => {
+    acc[part.type] = part.value;
+    return acc;
+  }, {});
+  return `${parts.year}${parts.month}${parts.day}-${parts.hour}${parts.minute}${parts.second}`;
+}
+
+function listBackups() {
+  try {
+    const names = fs.readdirSync(BACKUP_DIR).filter((name) => /^state-\d{8}-\d{6}\.json$/.test(name));
+    return names
+      .map((name) => {
+        const full = path.join(BACKUP_DIR, name);
+        const stat = fs.statSync(full);
+        return { name, size: stat.size, mtime: stat.mtime.toISOString() };
+      })
+      .sort((a, b) => Date.parse(b.mtime) - Date.parse(a.mtime));
+  } catch {
+    return [];
+  }
+}
+
+function pruneBackups() {
+  const backups = listBackups();
+  for (const old of backups.slice(BACKUP_KEEP)) {
+    try {
+      fs.unlinkSync(path.join(BACKUP_DIR, old.name));
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function writeBackup(reason = 'manual') {
+  fs.mkdirSync(BACKUP_DIR, { recursive: true });
+  store.save(); // flush the latest in-memory state before copying
+  const name = `state-${backupStamp()}.json`;
+  const target = path.join(BACKUP_DIR, name);
+  fs.copyFileSync(STATE_PATH, target);
+  pruneBackups();
+  const stat = fs.statSync(target);
+  console.log(`[backup] snapshot (${reason}) -> ${target}`);
+  return { file: target, name, size: stat.size, mtime: stat.mtime.toISOString(), kept: listBackups().length };
+}
+
+function scheduleAutoBackup() {
+  if (!BACKUP_AUTO_MINUTES) return;
+  const intervalMs = BACKUP_AUTO_MINUTES * 60_000;
+  const timer = setInterval(() => {
+    if (!Object.keys(state.accounts || {}).length) return;
+    if (Date.now() - lastAutoSnapshotAt < intervalMs) return;
+    try {
+      writeBackup('auto');
+      lastAutoSnapshotAt = Date.now();
+    } catch (err) {
+      console.warn('[backup] auto snapshot failed:', err?.message || err);
+    }
+  }, Math.min(60_000, intervalMs));
+  timer.unref?.();
+}
+
+function backupPayload(scope, accountId) {
+  if (scope === 'account') {
+    const account = getAccountOr404(accountId);
+    return {
+      format: 'chimatrader-backup',
+      version: 1,
+      scope: 'account',
+      exportedAt: nowIso(),
+      accounts: [cloneJson(account)],
+      watchlist: store.getWatchlist(),
+      alerts: [],
+    };
+  }
+  return {
+    format: 'chimatrader-backup',
+    version: 1,
+    scope: 'all',
+    exportedAt: nowIso(),
+    accounts: Object.values(state.accounts || {}).map((account) => cloneJson(account)),
+    watchlist: store.getWatchlist(),
+    alerts: store.listAlerts(),
+  };
+}
+
+function normalizeImportedAccount(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const account = cloneJson(raw);
+  if (!account.id || typeof account.id !== 'string') account.id = store.nextId('acc');
+  account.settings = mergeSettings(defaultAccountSettings(), account.settings || {});
+  if (!account.marginMode) account.marginMode = 'isolated';
+  account.cash = account.cash || { CNY: 0, HKD: 0, USD: 0, USDT: 0 };
+  account.positions = account.positions || {};
+  account.orders = Array.isArray(account.orders) ? account.orders : [];
+  account.trades = Array.isArray(account.trades) ? account.trades : [];
+  account.equityHistory = Array.isArray(account.equityHistory) ? account.equityHistory : [];
+  account.liquidations = Array.isArray(account.liquidations) ? account.liquidations : [];
+  account.conversions = Array.isArray(account.conversions) ? account.conversions : [];
+  return account;
+}
+
 // ---------------------------------------------------------------- routes
 
 const routes = [];
@@ -746,6 +861,93 @@ route('GET', /^\/api\/settings\/meta$/, async (_req, res) => {
       baseCurrency: CONFIG.defaults?.baseCurrency || 'CNY',
     },
   });
+});
+
+route('GET', /^\/api\/backup\/status$/, async (_req, res) => {
+  let dataFile = { path: STATE_PATH, exists: false, size: 0, mtime: null };
+  try {
+    const stat = fs.statSync(STATE_PATH);
+    dataFile = { path: STATE_PATH, exists: true, size: stat.size, mtime: stat.mtime.toISOString() };
+  } catch {
+    /* not created yet */
+  }
+  sendJson(res, 200, {
+    dataFile,
+    backupDir: BACKUP_DIR,
+    snapshots: listBackups(),
+    accountCount: Object.keys(state.accounts || {}).length,
+    autoMinutes: BACKUP_AUTO_MINUTES,
+    keep: BACKUP_KEEP,
+  });
+});
+
+route('GET', /^\/api\/backup\/export$/, async (_req, res, url) => {
+  const scope = String(url.searchParams.get('scope') || 'all').toLowerCase();
+  if (scope !== 'account' && scope !== 'all') {
+    throw httpError(400, 'SCOPE_INVALID', 'scope 只能是 account 或 all');
+  }
+  let accountId = null;
+  if (scope === 'account') {
+    accountId = url.searchParams.get('accountId');
+    if (!accountId) throw httpError(400, 'ACCOUNT_REQUIRED', '导出单个账户需要 accountId');
+    getAccountOr404(accountId);
+  }
+  const payload = JSON.stringify(backupPayload(scope, accountId), null, 2);
+  const stamp = backupStamp();
+  const filename = scope === 'account'
+    ? `chimatrader-account-${accountId}-${stamp}.json`
+    : `chimatrader-backup-all-${stamp}.json`;
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': Buffer.byteLength(payload),
+    'Cache-Control': 'no-store',
+  });
+  res.end(payload);
+});
+
+route('POST', /^\/api\/backup\/snapshot$/, async (_req, res) => {
+  const result = writeBackup('manual');
+  sendJson(res, 200, { ok: true, ...result });
+});
+
+route('POST', /^\/api\/backup\/import$/, async (req, res) => {
+  const body = await readJsonBody(req, 30_000_000);
+  const data = body.data;
+  if (!data || data.format !== 'chimatrader-backup' || !Array.isArray(data.accounts) || !data.accounts.length) {
+    throw httpError(400, 'BACKUP_INVALID', '备份文件格式不正确（需要 format=chimatrader-backup 且 accounts 非空）');
+  }
+  const mode = String(body.mode || 'new-account');
+  if (mode === 'restore') {
+    if (body.confirm !== 'RESTORE') {
+      throw httpError(400, 'CONFIRM_REQUIRED', '恢复全部数据需要 confirm 字段为 RESTORE');
+    }
+    const accounts = {};
+    for (const raw of data.accounts) {
+      const account = normalizeImportedAccount(raw);
+      if (!account) throw httpError(400, 'BACKUP_INVALID', '备份中的账户数据无效');
+      accounts[account.id] = account;
+    }
+    // Keep a snapshot of the current state before overwriting it.
+    writeBackup('before-restore');
+    state.accounts = accounts;
+    if (Array.isArray(data.watchlist)) state.watchlist = data.watchlist.map(String);
+    if (Array.isArray(data.alerts)) state.alerts = data.alerts;
+    store.save();
+    sendJson(res, 200, { ok: true, accounts: Object.keys(accounts).length, restoredAt: nowIso() });
+    return;
+  }
+  if (mode !== 'new-account') {
+    throw httpError(400, 'MODE_INVALID', 'mode 只能是 new-account 或 restore');
+  }
+  const source = normalizeImportedAccount(data.accounts[0]);
+  if (!source) throw httpError(400, 'BACKUP_INVALID', '备份中的账户数据无效');
+  source.id = store.nextId('acc');
+  source.name = `${String(source.name || '账户').slice(0, 18)}（导入）`;
+  source.createdAt = nowIso();
+  store.addAccount(source);
+  store.save();
+  sendJson(res, 201, { account: source });
 });
 
 route('POST', /^\/api\/accounts$/, async (req, res) => {
@@ -1225,6 +1427,15 @@ server.listen(PORT, HOST, () => {
   console.log(`[server] 千亦所 ChimaTrader 已启动： http://${HOST}:${PORT}`);
   console.log(`[server] 数据目录： ${DATA_DIR}`);
   lastSnapshotAt = 0;
+  if (Object.keys(state.accounts || {}).length) {
+    try {
+      writeBackup('startup');
+      lastAutoSnapshotAt = Date.now();
+    } catch (err) {
+      console.warn('[backup] startup snapshot failed:', err?.message || err);
+    }
+  }
+  scheduleAutoBackup();
   tickTimer = setInterval(() => {
     runTick('interval').catch((err) => console.warn('[tick]', err?.message || err));
   }, CONFIG.refresh?.tickMs || 2000);

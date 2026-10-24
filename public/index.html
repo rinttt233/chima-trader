@@ -26,6 +26,7 @@
     </label>
     <button type="button" class="btn btn-ghost" id="btn-new-account">新建账户</button>
     <button type="button" class="btn btn-ghost" id="btn-account-settings">账户设置</button>
+    <button type="button" class="btn btn-ghost" id="btn-data" title="本地数据保存、快照与导入导出">数据</button>
     <button type="button" class="btn btn-ghost" id="btn-reset-account">重置账户</button>
     <button type="button" class="btn btn-ghost btn-help" id="btn-help" title="新手帮助与术语速查">帮助</button>
   </div>
@@ -284,7 +285,7 @@
               <th class="ta-r">数量</th><th class="ta-r">可平</th><th class="ta-r">杠杆</th>
               <th class="ta-r">成本价</th><th class="ta-r">现价</th><th class="ta-r">保证金</th>
               <th class="ta-r">强平价</th><th class="ta-r">风险率</th><th class="ta-r">市值</th>
-              <th class="ta-r">浮动盈亏</th><th class="ta-r">盈亏率</th><th class="ta-r">今日盈亏</th>
+              <th class="ta-r">浮动盈亏</th><th class="ta-r">盈亏率</th><th class="ta-r" title="今日盈亏：今日新开仓按开仓价计，隔夜仓按昨收计">今日盈亏</th>
               <th class="ta-r">利息</th><th class="ta-r">操作</th>
             </tr>
           </thead>
@@ -564,6 +565,83 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="modal-data" hidden>
+  <div class="modal modal-wide modal-data" role="dialog" aria-modal="true" aria-labelledby="data-title">
+    <div class="modal-head">
+      <h2 id="data-title">数据管理</h2>
+      <button type="button" class="icon-btn" data-close-modal="modal-data" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint">账户数据实时保存在本机，关闭浏览器不会丢失；每笔成交/委托都会立即写入。</p>
+      <div class="settings-lock data-demo" id="data-demo-note" hidden>演示模式：数据仅保存在浏览器内存，不支持本地备份。</div>
+
+      <div class="data-status">
+        <div class="data-status-head">
+          <h3 class="settings-title">自动保存状态</h3>
+          <button type="button" class="link-btn" id="btn-data-refresh">刷新</button>
+        </div>
+        <div class="data-row"><span>数据文件</span><b id="data-file-path">加载中…</b></div>
+        <div class="data-row"><span>文件大小</span><b id="data-file-size">--</b></div>
+        <div class="data-row"><span>最近写入</span><b id="data-file-mtime">--</b></div>
+        <div class="data-row"><span>账户数</span><b id="data-account-count">--</b></div>
+        <div class="data-row"><span>自动快照</span><b id="data-auto-info">--</b></div>
+        <details class="data-snapshots" id="data-snapshots-wrap" open>
+          <summary>最近快照 <span id="data-snapshot-count"></span></summary>
+          <ul id="data-snapshots"></ul>
+        </details>
+        <div class="form-error" id="data-status-error" hidden></div>
+      </div>
+
+      <div class="data-actions" id="data-actions">
+        <button type="button" class="btn" id="btn-data-snapshot">立即快照</button>
+        <button type="button" class="btn" id="btn-data-export-account">导出当前账户（JSON）</button>
+        <button type="button" class="btn" id="btn-data-export-all">导出全部账户（JSON）</button>
+        <button type="button" class="btn" id="btn-data-export-csv">导出成交记录 CSV</button>
+        <button type="button" class="btn btn-primary" id="btn-data-import">导入备份</button>
+      </div>
+      <input type="file" id="data-import-file" accept=".json,application/json" hidden>
+      <p class="settings-note" id="data-action-note">导出文件可用于迁移或恢复；恢复操作会覆盖当前全部账户数据。</p>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close-modal="modal-data">关闭</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="modal-import" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
+    <div class="modal-head">
+      <h2 id="import-title">导入备份</h2>
+      <button type="button" class="icon-btn" data-close-modal="modal-import" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint" id="import-file-summary">--</p>
+      <div class="import-option">
+        <div class="import-option-text">
+          <b>导入为新账户（推荐）</b>
+          <small>保留持仓、成交、历史与账户参数，追加为「原名称（导入）」。</small>
+        </div>
+        <button type="button" class="btn btn-primary" id="btn-import-new">导入为新账户</button>
+      </div>
+      <div class="import-option is-danger">
+        <div class="import-option-text">
+          <b>恢复全部数据（覆盖）</b>
+          <small>用备份覆盖当前全部账户、自选与提醒，操作不可撤销。</small>
+        </div>
+        <label class="settings-check">
+          <input type="checkbox" id="import-confirm-restore">
+          <span>我确认覆盖当前全部数据</span>
+        </label>
+        <button type="button" class="btn btn-danger" id="btn-import-restore" disabled>恢复全部数据（覆盖）</button>
+      </div>
+      <div class="form-error" id="import-error" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close-modal="modal-import">取消</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modal-help" hidden>
   <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="help-title">
     <div class="modal-head">
@@ -596,6 +674,10 @@
         <dt>保证金模式</dt><dd>逐仓=每个仓位单独算保证金，亏完该仓保证金即强平；全仓=账户所有资金共同担保，风险更集中但不易单仓爆仓。</dd>
         <dt>强平</dt><dd>亏到保证金不足维持仓位时，系统会强制市价平仓，并收取强平费；风险率超过 80% 会预警。</dd>
         <dt>利息</dt><dd>杠杆借入的资金/币按年化利率逐小时计息，平仓时从平仓所得中扣除。</dd>
+        <dt>今日盈亏</dt><dd>今日新开仓按开仓价计，隔夜仓按昨收计；因此今日新仓的今日盈亏会与浮动盈亏一致（忽略手续费）。</dd>
+        <dt>自动保存</dt><dd>账户、持仓、成交与委托会自动写入本机 data/state.json，关闭浏览器不会丢失；成交/委托会立即落盘。</dd>
+        <dt>快照</dt><dd>手动「立即快照」或服务端定时快照会保存一份完整数据到 data/backups/，可用来回滚或迁移。</dd>
+        <dt>导入导出</dt><dd>「数据」弹层可导出当前账户/全部账户 JSON 或成交 CSV；导入备份可新建账户或覆盖恢复全部数据。</dd>
         <dt>T+1</dt><dd>A股当天买入的股票，最早下一个交易日才能卖出；港美加密可以当天卖。</dd>
         <dt>涨跌停</dt><dd>A股单日涨跌幅有上限（一般为 ±10%），超出范围的委托会被拒绝。</dd>
         <dt>整手</dt><dd>A股每次买卖数量必须是 100 股的整数倍；港股按每手股数。</dd>

@@ -133,4 +133,22 @@
 - 显示层：先四舍五入再判符号，`|值| < 0.005` 直接显示 0 / 0.00%，避免 `-0.00%` 与红绿闪烁；颜色也按四舍五入后的值判断。
 - 回归测试：在浏览器里开空单，采样 DOM 显示的盈亏率与「按方向公式算出的期望值」逐次对比（12 次采样全部一致），比肉眼观察可靠。
 
+## 13. 「今日盈亏」的口径（v1.2.0 修复）
+
+- 浮动盈亏 = (现价 − 开仓均价) × 数量；**今日盈亏不能简单用 (现价 − 昨收) × 数量**——今天才开的仓，会把「昨收 → 开仓价」这段开仓前的行情也算进去，看起来和浮盈对不上（用户实例：浮盈 -6.16，今日 -618）。
+- 正确口径：**当日新开仓用开仓均价做基准，隔夜仓用昨收做基准**；判断「当日」用 Asia/Shanghai 日历日（`dayKeyOf(openedAt) === dayKeyOf(now)`），`openedAt` 缺失/非法按隔夜处理。多空方向各自算。
+- 这个口径必须前后端一致：引擎 `portfolioView` 的 `position.todayPnl` 与前端 `positionMetrics` 都要改，否则表格和快照又会对不上；表头加 tooltip 说明口径。
+- 账户级「今日盈亏」仍是权益差（`equity - dayStartEquity`），两者不要混为一谈。
+
+## 14. 本地数据保存/备份（v1.2.0）
+
+- 自动保存早就存在（`data/state.json` 原子写、成交同步、行情标记 300ms 合并），但用户「看不见 = 以为没有」。所以补的不只是能力，还有**可见的状态与导出入口**。
+- 实现要点：
+  - 导出/导入统一用 `{format:'chimatrader-backup', version:1, accounts:[...]}` 的自描述格式，导入先校验 format/version/accounts，再按 `new-account`（默认，安全）或 `restore`（覆盖，必须 `confirm:'RESTORE'`）执行。
+  - **恢复前先自动快照当前状态**（`before-restore`），避免用户误操作把现有数据永久覆盖。
+  - 自动快照用「服务启动 + 定时（默认 60 分钟）」，文件名 `state-YYYYMMDD-HHmmss.json`（Asia/Shanghai），保留最近 N 份按时间淘汰；读取状态时直接 stat 文件，不依赖内存计数。
+  - 导入的账户要按 bootstrap 规则补 `settings/marginMode` 等新字段，否则旧备份恢复后账户参数会缺。
+- 传输层细节：导出用 `Content-Disposition: attachment` 让浏览器直接下载、文件名由服务端给；导入走 JSON body，把 `readJsonBody` 上限调到 30MB（带成交历史的账户会比较大）。
+
+
 

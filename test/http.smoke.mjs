@@ -389,6 +389,62 @@ async function main() {
     check('GET trades.csv exports CSV with header', csvRes.status === 200 && csvText.includes('时间'),
       `${csvText.length} bytes`);
 
+    // ---- v4 local backup / export / import --------------------------------
+    const bstatus = await api('/api/backup/status');
+    check('GET /api/backup/status reports local data file and snapshots',
+      bstatus.status === 200 && bstatus.body?.dataFile?.exists === true
+        && Array.isArray(bstatus.body?.snapshots) && bstatus.body?.autoMinutes > 0,
+      `snapshots=${bstatus.body?.snapshots?.length} auto=${bstatus.body?.autoMinutes}`);
+
+    const snapRes = await api('/api/backup/snapshot', { method: 'POST' });
+    check('POST /api/backup/snapshot writes a local snapshot',
+      snapRes.status === 200 && !!snapRes.body?.file && snapRes.body?.size > 0,
+      `file=${String(snapRes.body?.file || '').split(/[\\/]/).pop()} kept=${snapRes.body?.kept}`);
+
+    const expRes = await fetch(`${BASE}/api/backup/export?scope=account&accountId=${accountId}`);
+    const expText = await expRes.text();
+    let expData = null;
+    try { expData = JSON.parse(expText); } catch { /* ignore */ }
+    check('GET /api/backup/export downloads a valid account backup',
+      expRes.status === 200
+        && String(expRes.headers.get('content-disposition') || '').includes('attachment')
+        && expData?.format === 'chimatrader-backup'
+        && expData?.accounts?.[0]?.id === accountId,
+      `format=${expData?.format}`);
+
+    const importRes = await api('/api/backup/import', {
+      method: 'POST',
+      body: JSON.stringify({ data: expData, mode: 'new-account' }),
+    });
+    check('POST /api/backup/import recreates an account from backup',
+      importRes.status === 201
+        && !!importRes.body?.account?.id
+        && importRes.body.account.id !== accountId
+        && String(importRes.body.account.name).includes('导入'),
+      `name=${importRes.body?.account?.name}`);
+
+    const allExpRes = await fetch(`${BASE}/api/backup/export?scope=all`);
+    const allData = JSON.parse(await allExpRes.text());
+    check('GET /api/backup/export?scope=all includes every account',
+      allExpRes.status === 200 && Array.isArray(allData.accounts) && allData.accounts.length >= 2,
+      `${allData.accounts?.length} accounts`);
+
+    const restoreGuard = await api('/api/backup/import', {
+      method: 'POST',
+      body: JSON.stringify({ data: allData, mode: 'restore' }),
+    });
+    check('restore requires explicit confirmation',
+      restoreGuard.status === 400 && restoreGuard.body?.error?.code === 'CONFIRM_REQUIRED',
+      `status=${restoreGuard.status}`);
+
+    const restoreRes = await api('/api/backup/import', {
+      method: 'POST',
+      body: JSON.stringify({ data: allData, mode: 'restore', confirm: 'RESTORE' }),
+    });
+    check('restore replaces local state with the backup',
+      restoreRes.status === 200 && restoreRes.body?.accounts === allData.accounts.length,
+      `accounts=${restoreRes.body?.accounts}`);
+
     const tick = await api('/api/dev/tick', { method: 'POST' });
     check('POST /api/dev/tick works', tick.status === 200 && tick.body?.ok === true, `status=${tick.status}`);
 

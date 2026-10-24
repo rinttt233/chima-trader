@@ -1643,3 +1643,55 @@ input, select { font-family: inherit; }
 
 .settings-quick button em { font-style: normal; font-size: 9px; color: #8fb4e8; margin-left: 2px; }
 
+
+/* ------------------------------------------------------ data management (v4) */
+
+.modal-data { width: min(820px, 94vw); }
+.data-demo { margin-top: 8px; }
+.data-status {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #060a11;
+}
+.data-status-head { display: flex; align-items: center; justify-content: space-between; }
+.data-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 4px 0;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.04);
+  font-size: 11.5px;
+  color: var(--text-mute);
+}
+.data-row:last-of-type { border-bottom: none; }
+.data-row b { color: var(--text-dim); font-weight: 500; font-family: var(--mono); word-break: break-all; text-align: right; }
+.data-snapshots { margin-top: 7px; border-top: 1px dashed var(--border-soft); padding-top: 6px; font-size: 11px; color: var(--text-mute); }
+.data-snapshots summary { cursor: pointer; color: var(--text-dim); }
+.data-snapshots ul { margin: 6px 0 0; padding-left: 16px; }
+.data-snapshots li { margin: 3px 0; font-family: var(--mono); font-size: 10.5px; }
+.data-actions { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
+.data-actions .btn { height: 32px; font-size: 11.5px; }
+.data-actions .btn:last-child { grid-column: 1 / -1; }
+.import-option {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: #060a11;
+}
+.import-option.is-danger { border-color: rgba(246, 70, 93, 0.32); background: rgba(246, 70, 93, 0.04); }
+.import-option-text b { display: block; font-size: 12.5px; color: var(--text); }
+.import-option-text small { display: block; margin-top: 3px; font-size: 10.5px; line-height: 1.55; color: var(--text-mute); }
+.import-option .btn { align-self: flex-start; height: 28px; font-size: 11px; }
+.import-option .settings-check { margin-top: 0; }
+@media (max-width: 720px) {
+  .modal-data { width: 100vw; height: 100vh; max-height: 100vh; border-radius: 0; border-width: 0; }
+  .data-actions { grid-template-columns: 1fr; }
+  .data-actions .btn:last-child { grid-column: auto; }
+}

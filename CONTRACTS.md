@@ -272,6 +272,10 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 
 - 持仓平均成本：加仓加权平均，减仓成本不变；卖出实现盈亏 = `(卖价 - 均价) * qty - 手续费`。
 - 持仓：`{ symbol, qty, availableQty, avgCost, market, name, currency, lastPrice, marketValue, unrealizedPnl, unrealizedPnlPct, todayPnl }`
+- **持仓「今日盈亏」`todayPnl` 的基准**：
+  - 当日新开仓（`dayKeyOf(position.openedAt) === dayKeyOf(now)`，Asia/Shanghai 日历日）→ 基准价 = `avgCost`；
+  - 隔夜仓（昨天及以前开仓，或 `openedAt` 缺失/非法）→ 基准价 = `quote.prevClose`（缺失回退 `last`）；
+  - 方向：多 `(last - base) * qty`，空 `(base - last) * qty`。当日新仓时该值应等于未实现盈亏（不含手续费）。
 - 权益 = Σ现金折算 + Σ持仓市值折算（按 fxRates 折 CNY）。
 - 账户快照还包括 `dayStartEquity`（当日 00:00 权益，用于当日盈亏）、`todayPnl`、`totalPnl`、`totalPnlPct`。
 
@@ -454,6 +458,52 @@ PATCH /api/accounts/:id/settings      body { settings } -> { account }   // 部�
 - 杠杆上限倍率：**1×（推荐）** → cn 1 / hk 10 / us 10 / fx 200 / crypto 100；0.1× 保守（加密 10x / 外汇 20x / 港美 1x）；2× 激进（加密 125x / 外汇 400x / 港美 20x，按上限截断）
 - 维持保证金率：cn 1 / hk 5% / us 5% / fx 0.25% / crypto 0.5%
 - 费率与 §6.2 相同；滑点 cn/hk/us 1bp、fx 2bp、crypto 3bp；借币年化 crypto 8%、fx 3%、hk/us 6%；强平费 crypto 0.5%、hk/us 0.2%、fx 0；换汇成本 0.3%
+
+---
+
+## 6C. 本地数据保存与备份（v4）
+
+账户数据默认自动保存在 `<dataDir>/state.json`（原子写；成交/委托同步落盘，行情标记 300ms 合并写）。在此基础上提供显式备份/导出/导入能力，全部只写本机磁盘：
+
+### 6C.1 自动快照
+
+- 服务启动时（state 已有账户）写一份快照；之后每隔 `config.backup.autoMinutes`（默认 60 分钟）写一份。
+- 快照文件：`<dataDir>/backups/state-YYYYMMDD-HHmmss.json`，保留最近 `config.backup.keep`（默认 20）份，超出按时间删除最旧。
+
+### 6C.2 导出格式
+
+```json
+{
+  "format": "chimatrader-backup",
+  "version": 1,
+  "scope": "account" | "all",
+  "exportedAt": "ISO",
+  "accounts": [ /* 完整 account 对象，含 settings/positions/orders/trades/equityHistory */ ],
+  "watchlist": ["cn:sh600519"],
+  "alerts": []
+}
+```
+
+### 6C.3 接口
+
+```
+GET  /api/backup/status
+   -> { dataFile:{path,exists,size,mtime}, backupDir, snapshots:[{name,size,mtime}], accountCount, autoMinutes, keep }
+
+GET  /api/backup/export?scope=account&accountId=acc_xxx   -> JSON 文件下载（Content-Disposition attachment）
+GET  /api/backup/export?scope=all                         -> JSON 文件下载
+
+POST /api/backup/snapshot
+   -> { ok:true, file, size, mtime, kept:number }
+
+POST /api/backup/import   body { data:{format,version,accounts,...}, mode:'new-account'|'restore', confirm? }
+   - mode='new-account'：取 data.accounts[0]，生成新 id、名称追加「（导入）」，保留持仓/成交/历史与 settings → 201 { account }
+   - mode='restore'：整体覆盖账户/watchlist/alerts，必须 body.confirm==='RESTORE'，否则 400 CONFIRM_REQUIRED；成功 { ok:true, accounts:number }
+```
+
+- 导入校验：`format === 'chimatrader-backup'` 且 `accounts` 为非空数组，否则 400 `BACKUP_INVALID`。
+- 导入的账户缺 `settings/marginMode` 等新字段时按 bootstrap 规则补默认值；成交/委托/净值历史原样保留。
+- 所有备份文件只含本机模拟数据，不含任何凭据。
 
 ---
 

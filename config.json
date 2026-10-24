@@ -281,5 +281,9 @@
         "tz": "America/New_York"
       }
     ]
+  },
+  "backup": {
+    "autoMinutes": 60,
+    "keep": 20
   }
 }

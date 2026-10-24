@@ -213,7 +213,15 @@
     searchIndex: -1,
     limitPriceSymbol: null,
     confirmResolve: null,
-    lastErrorBanner: null
+    lastErrorBanner: null,
+    data: {
+      status: null,
+      loading: false,
+      loadToken: 0,
+      importData: null,
+      importName: null,
+      importBusy: false
+    }
   };
   window.__APP_STATE = state;
   window.__APP_ERRORS = [];
@@ -1374,6 +1382,20 @@
 
   // Shared P&L math so the full render and the live (SSE/poll) patch always
   // agree, including for short positions. Price priority: live quote > snapshot.
+  function shanghaiDayKey(value) {
+    var d;
+    if (typeof value === 'number') d = new Date(value + 8 * 3600 * 1000);
+    else d = beijingDate(value);
+    if (!d || !isFinite(d.getTime())) return null;
+    return d.getUTCFullYear() + '-' + pad2(d.getUTCMonth() + 1) + '-' + pad2(d.getUTCDate());
+  }
+
+  function positionOpenedToday(pos) {
+    if (!pos || !pos.openedAt) return false;
+    var openedKey = shanghaiDayKey(pos.openedAt);
+    return openedKey != null && openedKey === shanghaiDayKey(Date.now());
+  }
+
   function positionMetrics(pos, quote) {
     var q = quote || quoteOf(pos && pos.symbol);
     var last = q && q.price != null && isFinite(q.price)
@@ -1385,13 +1407,17 @@
     var prevClose = q && q.prevClose != null && isFinite(q.prevClose) ? Number(q.prevClose) : last;
     var unrealized = side === 'short' ? (avg - last) * qty : (last - avg) * qty;
     var unrealizedPct = avg ? (side === 'short' ? (avg - last) / avg : (last / avg - 1)) * 100 : 0;
-    var today = (side === 'short' ? prevClose - last : last - prevClose) * qty;
+    // CONTRACTS 6.5: positions opened today measure from their entry price;
+    // overnight positions measure from the previous close.
+    var todayBase = positionOpenedToday(pos) && avg > 0 ? avg : prevClose;
+    var today = (side === 'short' ? todayBase - last : last - todayBase) * qty;
     return {
       last: last,
       avg: avg,
       qty: qty,
       side: side,
       prevClose: prevClose,
+      todayBase: todayBase,
       marketValue: qty * last,
       unrealized: unrealized,
       unrealizedPct: unrealizedPct,
@@ -2628,6 +2654,282 @@
     } finally {
       btn.disabled = false;
     }
+  }
+
+  // ------------------------------------------------------------- data/backup
+
+  function formatBytes(bytes) {
+    var value = Number(bytes);
+    if (!isFinite(value) || value < 0) return '--';
+    if (value >= 1024 * 1024) return fmtNumber(value / (1024 * 1024), 2, 2) + ' MB';
+    if (value >= 1024) return fmtNumber(value / 1024, 2, 2) + ' KB';
+    return Math.round(value) + ' B';
+  }
+
+  function backupMtimeText(mtime) {
+    if (mtime == null) return '--';
+    if (typeof mtime === 'number') return fmtDateTime(new Date(mtime).toISOString());
+    var text = String(mtime);
+    if (isFinite(Date.parse(text))) return fmtDateTime(text);
+    return text;
+  }
+
+  function setBackupButtonsEnabled(enabled) {
+    ['#btn-data-snapshot', '#btn-data-export-account', '#btn-data-export-all', '#btn-data-export-csv', '#btn-data-import'].forEach(function (selector) {
+      var btn = $(selector);
+      if (btn) btn.disabled = !enabled;
+    });
+  }
+
+  function showDataError(message) {
+    showFormError('#data-status-error', message);
+  }
+  function clearDataError() {
+    hideFormError('#data-status-error');
+  }
+
+  function renderBackupStatus(status) {
+    var data = status || {};
+    var file = data.dataFile || {};
+    setText('#data-file-path', file.path || '--');
+    setText('#data-file-size', file.exists === false ? '不存在' : formatBytes(file.size));
+    setText('#data-file-mtime', backupMtimeText(file.mtime));
+    setText('#data-account-count', data.accountCount != null ? String(data.accountCount) : '--');
+    var snapshots = Array.isArray(data.snapshots) ? data.snapshots.slice() : [];
+    snapshots.sort(function (a, b) { return (Date.parse(b.mtime) || 0) - (Date.parse(a.mtime) || 0); });
+    if (MOCK) {
+      setText('#data-auto-info', '演示模式不生成自动快照');
+    } else {
+      setText('#data-auto-info', '每 ' + (data.autoMinutes != null ? data.autoMinutes : '--') + ' 分钟一份，已保留 ' + snapshots.length + ' 份' +
+        (data.keep != null ? '（上限 ' + data.keep + '）' : ''));
+    }
+    var countEl = $('#data-snapshot-count');
+    if (countEl) countEl.textContent = snapshots.length ? '(' + snapshots.length + ')' : '(0)';
+    var list = $('#data-snapshots');
+    if (list) {
+      list.innerHTML = snapshots.slice(0, 3).map(function (snap) {
+        return '<li>' + escapeHtml(snap.name || '') + ' · ' + escapeHtml(formatBytes(snap.size)) +
+          ' · ' + escapeHtml(backupMtimeText(snap.mtime)) + '</li>';
+      }).join('') || '<li>暂无快照</li>';
+    }
+    var wrap = $('#data-snapshots-wrap');
+    if (wrap) wrap.hidden = false;
+  }
+
+  async function loadBackupStatus(force) {
+    if (state.data.loading && !force) return;
+    var token = ++state.data.loadToken;
+    state.data.loading = true;
+    clearDataError();
+    try {
+      var status = await api('/api/backup/status');
+      if (token !== state.data.loadToken) return;
+      state.data.status = status;
+      renderBackupStatus(status);
+      setBackupButtonsEnabled(!MOCK);
+      var exportAccountBtn = $('#btn-data-export-account');
+      if (exportAccountBtn) exportAccountBtn.disabled = MOCK || !state.accountId;
+      var csvBtn = $('#btn-data-export-csv');
+      if (csvBtn) csvBtn.disabled = MOCK || !state.accountId;
+    } catch (err) {
+      if (token !== state.data.loadToken) return;
+      showDataError('数据状态读取失败：' + errorText(err));
+      setText('#data-file-path', '--');
+      setText('#data-file-size', '--');
+      setText('#data-file-mtime', '--');
+      setText('#data-account-count', '--');
+      setText('#data-auto-info', '--');
+      setBackupButtonsEnabled(false);
+    } finally {
+      if (token === state.data.loadToken) state.data.loading = false;
+    }
+  }
+
+  function openDataManager() {
+    $('#modal-data').hidden = false;
+    hideFormError('#import-error');
+    var demoNote = $('#data-demo-note');
+    if (demoNote) demoNote.hidden = !MOCK;
+    setBackupButtonsEnabled(!MOCK);
+    loadBackupStatus();
+  }
+
+  function triggerDownload(url) {
+    var link = document.createElement('a');
+    link.href = url;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(function () { if (link.parentNode) link.parentNode.removeChild(link); }, 1000);
+  }
+
+  function parseBackupFile(file) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onload = function () {
+        var data = null;
+        try { data = JSON.parse(String(reader.result || '')); } catch (e) { data = null; }
+        if (!data || data.format !== 'chimatrader-backup') {
+          reject(new Error('备份格式不正确'));
+          return;
+        }
+        if (data.version !== 1) {
+          reject(new Error('备份版本不支持（' + data.version + '）'));
+          return;
+        }
+        if (!Array.isArray(data.accounts) || !data.accounts.length) {
+          reject(new Error('备份中没有账户数据'));
+          return;
+        }
+        resolve(data);
+      };
+      reader.onerror = function () { reject(new Error('文件读取失败')); };
+      reader.readAsText(file);
+    });
+  }
+
+  async function onBackupFileSelected(event) {
+    var input = event.target;
+    var file = input && input.files ? input.files[0] : null;
+    if (file) {
+      clearDataError();
+      try {
+        var data = await parseBackupFile(file);
+        state.data.importData = data;
+        state.data.importName = file.name;
+        setText('#import-file-summary', '已选择「' + file.name + '」：' + (data.accounts.length) + ' 个账户' +
+          (data.exportedAt ? ' · 导出于 ' + backupMtimeText(data.exportedAt) : ''));
+        setText('#import-error', '');
+        $('#import-error').hidden = true;
+        var confirmBox = $('#import-confirm-restore');
+        if (confirmBox) confirmBox.checked = false;
+        var restoreBtn = $('#btn-import-restore');
+        if (restoreBtn) restoreBtn.disabled = true;
+        openModal('modal-import');
+      } catch (err) {
+        var message = '备份文件无法导入（BACKUP_INVALID）：' + err.message;
+        showDataError(message);
+        showToast(message, 'error');
+      }
+    }
+    if (input) input.value = '';
+  }
+
+  function backupErrorMessage(err) {
+    if (!err) return '备份操作失败';
+    if (err.code === 'CONFIRM_REQUIRED') return '恢复全部数据需要二次确认';
+    if (err.code === 'BACKUP_INVALID') return '备份文件格式或版本不正确（BACKUP_INVALID）';
+    if (err.code === 'BACKUP_NOT_FOUND') return '备份文件不存在';
+    return errorText(err);
+  }
+
+  async function importBackup(mode) {
+    if (state.data.importBusy || !state.data.importData) return;
+    var isRestore = mode === 'restore';
+    if (isRestore) {
+      var confirmBox = $('#import-confirm-restore');
+      if (!confirmBox || !confirmBox.checked) {
+        showFormError('#import-error', '请先勾选「我确认覆盖当前全部数据」');
+        return;
+      }
+    }
+    state.data.importBusy = true;
+    var newBtn = $('#btn-import-new');
+    var restoreBtn = $('#btn-import-restore');
+    if (newBtn) newBtn.disabled = true;
+    if (restoreBtn) restoreBtn.disabled = true;
+    hideFormError('#import-error');
+    try {
+      var body = { data: state.data.importData, mode: isRestore ? 'restore' : 'new-account' };
+      if (isRestore) body.confirm = 'RESTORE';
+      var res = await api('/api/backup/import', { method: 'POST', body: body });
+      closeModal('modal-import');
+      closeModal('modal-data');
+      if (isRestore) {
+        var count = res && res.accounts != null ? res.accounts : state.data.importData.accounts.length;
+        await refreshAccounts();
+        await loadActiveTabData();
+        showToast('已恢复 ' + count + ' 个账户', 'success');
+      } else {
+        var account = res && res.account;
+        var name = account && account.name ? account.name : '导入账户';
+        await refreshAccounts(account ? account.id : null);
+        state.auxLoadedAt = 0;
+        loadActiveTabData();
+        showToast('已导入为新账户「' + name + '」', 'success');
+      }
+      state.data.importData = null;
+      state.data.importName = null;
+      // Restore may create a before-restore snapshot; refresh the data status
+      // so reopening the manager shows the latest backup list.
+      loadBackupStatus(true);
+    } catch (err) {
+      showFormError('#import-error', backupErrorMessage(err));
+    } finally {
+      state.data.importBusy = false;
+      if (newBtn) newBtn.disabled = false;
+      if (restoreBtn) restoreBtn.disabled = !($('#import-confirm-restore') && $('#import-confirm-restore').checked);
+    }
+  }
+
+  function applySnapshotResult(res) {
+    var status = state.data.status;
+    if (!status || !res) return;
+    var name = res.name || String(res.file || '').split(/[\\/]/).pop();
+    if (!name) return;
+    var snapshots = Array.isArray(status.snapshots) ? status.snapshots.slice() : [];
+    snapshots = snapshots.filter(function (snap) { return snap && snap.name !== name; });
+    snapshots.unshift({ name: name, size: res.size, mtime: res.mtime });
+    status.snapshots = snapshots;
+    status.dataFile = status.dataFile || {};
+    if (res.size != null) status.dataFile.size = res.size;
+    if (res.mtime != null) status.dataFile.mtime = res.mtime;
+    status.dataFile.exists = true;
+    renderBackupStatus(status);
+  }
+
+  async function saveBackupSnapshot() {
+    if (MOCK) return;
+    var btn = $('#btn-data-snapshot');
+    if (btn) btn.disabled = true;
+    clearDataError();
+    try {
+      var res = await api('/api/backup/snapshot', { method: 'POST' });
+      // Update immediately so the list reflects the new snapshot even before
+      // the status request round-trip finishes, then reconcile with the server.
+      applySnapshotResult(res);
+      var savedName = res && res.name ? ('data/backups/' + res.name) : (res && res.file ? res.file : 'data/backups/');
+      showToast('已保存到 ' + savedName, 'success');
+      await loadBackupStatus(true);
+    } catch (err) {
+      showDataError('快照失败：' + errorText(err));
+      showToast('快照失败：' + errorText(err), 'error');
+    } finally {
+      if (btn) btn.disabled = MOCK;
+    }
+  }
+
+  function exportCurrentAccount() {
+    if (!state.accountId) {
+      showDataError('请先创建或选择账户');
+      return;
+    }
+    triggerDownload('/api/backup/export?scope=account&accountId=' + encodeURIComponent(state.accountId));
+    showToast('已开始下载当前账户备份', 'success');
+  }
+
+  function exportAllAccounts() {
+    triggerDownload('/api/backup/export?scope=all');
+    showToast('已开始下载全部账户备份', 'success');
+  }
+
+  function exportTradesCsv() {
+    if (!state.accountId) {
+      showDataError('请先创建或选择账户');
+      return;
+    }
+    triggerDownload('/api/accounts/' + encodeURIComponent(state.accountId) + '/export/trades.csv');
+    showToast('已开始下载成交记录 CSV', 'success');
   }
 
   // --------------------------------------------------------------- watchlist
@@ -4970,6 +5272,21 @@
     });
     on($('#btn-new-account'), 'click', function () { openCreateAccount(false); });
     on($('#btn-account-settings'), 'click', openAccountSettings);
+    on($('#btn-data'), 'click', openDataManager);
+    on($('#btn-data-refresh'), 'click', loadBackupStatus);
+    on($('#btn-data-snapshot'), 'click', saveBackupSnapshot);
+    on($('#btn-data-export-account'), 'click', exportCurrentAccount);
+    on($('#btn-data-export-all'), 'click', exportAllAccounts);
+    on($('#btn-data-export-csv'), 'click', exportTradesCsv);
+    on($('#btn-data-import'), 'click', function () { var input = $('#data-import-file'); if (input) input.click(); });
+    on($('#data-import-file'), 'change', onBackupFileSelected);
+    on($('#import-confirm-restore'), 'change', function (event) {
+      var btn = $('#btn-import-restore');
+      if (btn) btn.disabled = !event.target.checked;
+      if (event.target.checked) hideFormError('#import-error');
+    });
+    on($('#btn-import-new'), 'click', function () { importBackup('new-account'); });
+    on($('#btn-import-restore'), 'click', function () { importBackup('restore'); });
     on($('#btn-reset-account'), 'click', openResetAccount);
     on($('#new-account-currency'), 'change', updateCapitalUnit);
     on($('#btn-help'), 'click', openHelp);
@@ -5243,6 +5560,8 @@
       if (state.onboardingActive) { finishOnboarding(); return; }
       if (state.universe.open) { closeUniverse(); return; }
       if (!$('#modal-margin-mode').hidden) { closeModal('modal-margin-mode'); return; }
+      if (!$('#modal-import').hidden) { closeModal('modal-import'); return; }
+      if (!$('#modal-data').hidden) { closeModal('modal-data'); return; }
       if (!$('#modal-help').hidden) { closeModal('modal-help'); return; }
       closeSearch();
       if (state.confirmResolve) { resolveConfirm(false); return; }

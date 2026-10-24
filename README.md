@@ -15,7 +15,7 @@
 
 ![主界面](docs/screenshot.png)
 
-> 更多界面：新手引导 [docs/onboarding.png](docs/onboarding.png) ｜ 全市场标的库 [docs/universe.png](docs/universe.png) ｜ 杠杆与风险预警 [docs/risk.png](docs/risk.png) ｜ 账户参数设置 [docs/account-settings.png](docs/account-settings.png)
+> 更多界面：新手引导 [docs/onboarding.png](docs/onboarding.png) ｜ 全市场标的库 [docs/universe.png](docs/universe.png) ｜ 杠杆与风险预警 [docs/risk.png](docs/risk.png) ｜ 账户参数设置 [docs/account-settings.png](docs/account-settings.png) ｜ 数据管理 [docs/backup.png](docs/backup.png)
 
 ```
 双击 start.cmd            # Windows 一键启动（自动打开浏览器）
@@ -70,6 +70,7 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 **账户**
 - 多账户、自定义初始资金、随时重置、成交记录导出 CSV（Excel 直接打开）
 - **账户设置**：随时查看/修改本账户的杠杆上限倍率、手续费、滑点、保证金率、利率与换汇成本（有持仓或挂单时风险参数锁定，费率仍可改）
+- **自动保存 + 本地备份**：账户数据实时写入本机 `data/state.json`（关浏览器不丢）；「数据」面板可查看保存状态、立即快照、导出当前/全部账户 JSON、导入备份或恢复
 - 持仓（成本 / 浮盈 / 今日盈亏 / 可卖数量）、当前委托（可撤单）、历史委托（状态筛选）、成交记录
 - 账户统计：胜率、盈亏比、最大回撤、夏普、总手续费、分市场 / 分标的统计
 - 净值曲线（60 秒一次快照，可切 1日/1周/1月/全部）
@@ -141,6 +142,31 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 
 ---
 
+## 数据保存与备份
+
+**数据一直在本地自动保存**：所有账户、持仓、委托、成交、净值历史、账户参数都写在 `data/state.json`。
+- 每笔下单/撤单/成交/改参数都会**同步写盘**；行情标记按 300ms 合并写；采用「写临时文件再重命名」的原子写，断电不会留下半个文件。
+- 关闭浏览器、重启电脑都不丢；换电脑时把 `data/state.json` 拷走即可。
+
+**「数据」面板**（顶栏）提供：
+- 当前数据文件路径、大小、最近写入时间、账户数、自动快照间隔与最近快照列表
+- **立即快照**：在 `data/backups/state-YYYYMMDD-HHmmss.json` 再存一份（服务启动时与每 60 分钟也会自动快照，保留最近 20 份，可在 `config.json` 的 `backup` 调整）
+- **导出当前账户 / 全部账户（JSON）**：完整备份（含持仓、成交、参数），可离线保存或迁移
+- **导入备份**：两种模式——「导入为新账户」（推荐，不动现有数据）或「恢复全部数据」（覆盖，需要二次确认）
+- **导出成交记录 CSV**（Excel 直接打开）
+
+导出的 JSON 格式：
+
+```json
+{ "format": "chimatrader-backup", "version": 1, "scope": "all",
+  "exportedAt": "2026-10-25T03:56:00.000Z",
+  "accounts": [ ... ], "watchlist": [ ... ], "alerts": [ ... ] }
+```
+
+> `data/` 目录是运行时数据：想彻底重来就停服后删除 `data/state.json`（备份仍在 `data/backups/`），重启会自动建默认账户。
+
+---
+
 ## 配置
 
 | 键 | 作用 |
@@ -155,6 +181,7 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 | `margin` | 维持保证金率、借币年化利率、强平费率的全局默认值 |
 | `accountSettings` | 账户参数的范围（ranges）、系统杠杆上限（leverageCeiling）与保守/推荐/激进预设 |
 | `autoConvert` / `fxConvertSpread` | 下单自动换汇开关与成本的全局默认值 |
+| `backup` | 本地自动快照间隔 `autoMinutes`（默认 60）与保留份数 `keep`（默认 20） |
 
 账户数据保存在 `data/state.json`（原子写入）。想彻底重来：停服 → 删除该文件 → 重启。
 
@@ -181,9 +208,10 @@ chima-trader/
     store.mjs           JSON 持久化（原子写 + 损坏恢复）
     stats.mjs           胜率/盈亏比/回撤/夏普/净值序列
   public/               前端 SPA（深色中文界面，lightweight-charts K 线）
-  test/                 engine 单测（63 例）、行情联网检查（约 63 项）、HTTP 冒烟（32 项）
+  test/                 engine 单测（74 例）、行情联网检查（约 63 项）、HTTP 冒烟（47 项）
   docs/                 界面截图
   data/state.json       运行时账户数据（首次启动生成）
+  data/backups/         本地自动/手动快照（保留最近 20 份）
 ```
 
 ---
@@ -193,9 +221,9 @@ chima-trader/
 ```
 node selfcheck.mjs              # 汇总四层，全绿才退出 0
 node selfcheck.mjs --json       # 机器可读结果
-node test/engine.test.mjs       # 只跑撮合与保证金规则单测（离线，71 例）
+node test/engine.test.mjs       # 只跑撮合与保证金规则单测（离线，74 例）
 node test/marketdata.check.mjs  # 只跑行情源联网检查（约 63 项，含标的库）
-node test/http.smoke.mjs        # 只跑端到端 HTTP 冒烟（40 项，含 SSE、杠杆开仓→平仓、账户参数、下单→持仓→撤单）
+node test/http.smoke.mjs        # 只跑端到端 HTTP 冒烟（47 项，含 SSE、杠杆、账户参数、备份导入导出、下单→持仓→撤单）
 ```
 
 判据：文件齐备、引擎单测、HTTP 冒烟为必须；行情联网检查中境外源不可达只算警告（代理没开时属预期）。
@@ -204,6 +232,7 @@ node test/http.smoke.mjs        # 只跑端到端 HTTP 冒烟（40 项，含 SSE
 
 - `GET /api/stream`：SSE 实时行情推送（`quotes` / `heartbeat` 事件）
 - `GET /api/quotes`、`/api/kline`、`/api/search`、`/api/universe`、`/api/markets`、`/api/health`
+- `GET /api/backup/status`、`GET /api/backup/export`、`POST /api/backup/snapshot`、`POST /api/backup/import`：本地保存状态、快照、导出/导入备份
 - `GET /api/settings/meta`：账户参数范围、杠杆上限倍率档位、保守/推荐/激进预设
 - `GET/POST /api/accounts`、`/api/accounts/:id`、`PATCH /api/accounts/:id/settings`、`/api/accounts/:id/orders`、`/trades`、`/stats`、`/equity`、`/export/trades.csv`
 - 完整契约见 [CONTRACTS.md](CONTRACTS.md)
@@ -228,6 +257,7 @@ URL 加 `?mock=1` 使用内置假数据（含每秒推送的模拟行情，可�
 - 加密日线以 UTC 00:00 为边界（显示为北京 08:00），与 A 股/外汇日线的北京时间 00:00 边界不同。
 - 标的库每个市场默认取约 100 条（按成交额/涨跌幅）而不是全市场数万条，其余标的用搜索查找；美股成交额是「价格 × 成交量」的估算值。
 - 实时推送通过浏览器 EventSource 实现；极端情况下（浏览器/网络代理拦截 SSE）会自动降级为 2 秒轮询，功能不受影响。
+- 本地数据是明文 JSON（`data/state.json` 与 `data/backups/`），包含你的模拟交易记录（无真实资金/凭据）；分享给他人前注意。导入备份只做结构与格式校验，不做内容审计。
 - 净值历史从首次运行开始积累，不回溯；撮合成交的部分状态按 300ms 合并落盘，强制结束进程最多丢失最近几百毫秒的行情标记（成交与委托本身是同步保存的）。
 
 ---

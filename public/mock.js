@@ -242,6 +242,11 @@
   }
   function nowISO() { return isoCN(Date.now()); }
   function todayKey() { return isoCN(Date.now()).slice(0, 10); }
+  function shanghaiDayKeyOf(iso) {
+    var ms = Date.parse(iso);
+    if (!isFinite(ms)) return null;
+    return isoCN(ms).slice(0, 10);
+  }
   function roundTo(value, digits) {
     var f = Math.pow(10, digits);
     return Math.round(value * f) / f;
@@ -599,6 +604,11 @@
     addSeedPosition(demo, 'us:usAAPL', 50, 215.8);
     addSeedPosition(demo, 'fx:EURUSD', 20000, 1.0720);
     addSeedPosition(demo, 'crypto:BTCUSDT', 0.15, 62500);
+    // Demo positions represent overnight holdings: today P&L uses prevClose.
+    var seedOpenedAt = isoCN(Date.now() - 26 * 3600 * 1000);
+    Object.keys(demo.positions).forEach(function (symbol) {
+      demo.positions[symbol].openedAt = seedOpenedAt;
+    });
 
     var old = Date.now() - 26 * 3600 * 1000;
     demo.trades = [
@@ -1351,7 +1361,10 @@
       positionsEquityCny += equityContrib;
       maintenanceCny += maintenance * (fxRates[pos.currency] || 1);
       byMarket[pos.market] = round2((byMarket[pos.market] || 0) + notional * (fxRates[pos.currency] || 1));
-      var todayPnl = round2((lastPrice - (q.prevClose || lastPrice)) * pos.qty * (side === 'short' ? -1 : 1));
+      var todayBase = pos.openedAt && shanghaiDayKeyOf(pos.openedAt) === todayKey()
+        ? pos.avgCost
+        : (q.prevClose != null ? q.prevClose : lastPrice);
+      var todayPnl = round2((side === 'short' ? todayBase - lastPrice : lastPrice - todayBase) * pos.qty);
       positions.push({
         symbol: symbol, market: pos.market, name: pos.name, currency: pos.currency,
         side: side, qty: roundTo(pos.qty, 8), availableQty: availableQty(account, pos),
@@ -1578,6 +1591,24 @@
     }
 
     if (pathname === '/api/settings/meta') return settingsMetaPayload();
+
+    if (pathname === '/api/backup/status') {
+      var mockSize = 0;
+      try { mockSize = JSON.stringify(state).length; } catch (e) { mockSize = 0; }
+      return {
+        dataFile: {
+          path: '浏览器内存（sessionStorage）',
+          exists: true,
+          size: mockSize,
+          mtime: nowISO()
+        },
+        backupDir: '浏览器内存',
+        snapshots: [],
+        accountCount: Object.keys(state.accounts).length,
+        autoMinutes: 0,
+        keep: 0
+      };
+    }
 
     if (pathname === '/api/markets') {
       return {
@@ -1882,6 +1913,18 @@
       }
       saveState();
       return { ok: true, margin: riskPos.margin, price: riskQuote.price };
+    }
+
+    if (pathname === '/api/dev/position-opened-at' && method === 'POST') {
+      var openedAccount = getAccount(String(body.accountId || ''));
+      var openedSymbol = normalizeSymbol(body.symbol);
+      var openedPos = openedAccount.positions[openedSymbol];
+      if (!openedPos) fail(404, 'POSITION_NOT_FOUND', '没有该持仓');
+      var openedAt = String(body.openedAt || '');
+      if (!isFinite(Date.parse(openedAt))) fail(400, 'BAD_REQUEST', 'openedAt 无效');
+      openedPos.openedAt = openedAt;
+      saveState();
+      return { ok: true, openedAt: openedPos.openedAt };
     }
 
     fail(404, 'NOT_FOUND', '接口不存在：' + pathname);
