@@ -7,7 +7,7 @@
 
 > 千亦所 ChimaTrader（简称 **ChimaTrader**）— 开源、可离线运行的模拟交易终端。零第三方依赖，数据全部来自公开只读行情接口。
 >
-> **下载即用**：前往 [Releases](https://github.com/rinttt233/chima-trader/releases) 下载 `chima-trader-v1.0.0.zip`，解压后双击 `start.cmd`（需 Node.js ≥ 20）。
+> **下载即用**：前往 [Releases](https://github.com/rinttt233/chima-trader/releases) 下载最新版 `chima-trader-vX.Y.Z.zip`，解压后双击 `start.cmd`（需 Node.js ≥ 20）。
 
 一个跑在自己电脑上的模拟交易平台：**行情接真实市场，资金完全是虚拟的**。不涉及任何真实货币交易，也不接入任何券商/交易所的下单通道（只读公开行情）。
 
