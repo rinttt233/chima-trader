@@ -108,3 +108,13 @@
 6. **利息存到持仓上**（`interestAnnual`），`accrueInterest` 就不需要 cfg 参数；按 `lastInterestAt` 增量累计，重复调用幂等（测试用精确数值断言 1.18391671）。
 7. **store 的 normalize 必须保留 v2 字段**并对 v1 老存档补默认值，否则重启后 margin/leverage 全丢（这个坑和之前 `bootstrapped` 字段被丢掉是同一类）。
 8. 前端做保证金预览时，强平价公式要与后端完全一致（多：`(avg-margin/qty)/(1-mmr)`，空：`(avg+margin/qty)/(1+mmr)`），否则用户看到的强平线和真实触发点不一致。
+
+## 10. Windows 启动脚本的坑（v1.0.1 修复）
+
+- **`.cmd` 文件必须是 CRLF 换行**。用编辑器/工具写成 LF 后，`cmd.exe` 解析多行 `if (...)` 块会直接报「命令语法不正确」并秒退，表现为「双击没反应、127.0.0.1:8787 打不开」。
+- 同时在 `.gitattributes` 里加 `*.cmd text eol=crlf`，否则 `* text=auto eol=lf` 会在 clone/checkout 时把 `.cmd` 又转回 LF，问题会在别人机器上复现。
+- 批处理内容尽量用 **ASCII**（中文在默认 936 代码页下容易乱码）；需要看中文日志就先 `chcp 65001`，把 Node 的 UTF-8 输出对齐到 UTF-8 控制台。
+- 不要先开浏览器再启动服务：加一个轮询 `/api/health` 的小 PowerShell 后台进程，等端口真的起来再 `Start-Process` 浏览器，否则用户先看到「无法访问此网站」。
+- 启动前用 `netstat -ano | findstr LISTENING.*:8787` 检查端口占用，给出明确提示比直接抛 `EADDRINUSE` 友好。
+- 验证方式：`cmd /c start.cmd` 后等 6–8 秒，确认 8787 有监听且 `/api/health` 返回 200；别只测 `node server.mjs`（那测不到批处理本身的语法问题）。
+
