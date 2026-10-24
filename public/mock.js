@@ -1857,14 +1857,25 @@
       }
       if (method === 'PATCH') {
         var accMode = getAccount(accountId);
-        var nextMode = body.marginMode === 'cross' ? 'cross' : body.marginMode === 'isolated' ? 'isolated' : null;
-        if (!nextMode) fail(400, 'INVALID_MARGIN_MODE', '保证金模式只能是 isolated 或 cross');
-        var hasPositions = Object.keys(accMode.positions || {}).some(function (key) { return accMode.positions[key].qty > 1e-9; });
-        var hasOpenOrders = (accMode.orders || []).some(function (order) { return order.status === 'open'; });
-        if (hasPositions || hasOpenOrders) {
-          fail(409, 'MARGIN_MODE_LOCKED', '有持仓或未成交委托时不能切换保证金模式');
+        var changed = false;
+        if (body.name !== undefined) {
+          var nextName = String(body.name || '').trim();
+          if (nextName.length < 1 || nextName.length > 20) fail(400, 'NAME_INVALID', '账户名称需为 1–20 个字符');
+          accMode.name = nextName;
+          changed = true;
         }
-        accMode.marginMode = nextMode;
+        if (body.marginMode !== undefined) {
+          var nextMode = body.marginMode === 'cross' ? 'cross' : body.marginMode === 'isolated' ? 'isolated' : null;
+          if (!nextMode) fail(400, 'INVALID_MARGIN_MODE', '保证金模式只能是 isolated 或 cross');
+          var hasPositions = Object.keys(accMode.positions || {}).some(function (key) { return accMode.positions[key].qty > 1e-9; });
+          var hasOpenOrders = (accMode.orders || []).some(function (order) { return order.status === 'open'; });
+          if (hasPositions || hasOpenOrders) {
+            fail(409, 'MARGIN_MODE_LOCKED', '有持仓或未成交委托时不能切换保证金模式');
+          }
+          accMode.marginMode = nextMode;
+          changed = true;
+        }
+        if (!changed) fail(400, 'BAD_REQUEST', '没有可更新的字段');
         saveState();
         return { account: accountSummary(accMode) };
       }

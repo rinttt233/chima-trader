@@ -383,7 +383,8 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 
 - `PATCH /api/accounts/:id/orders/:orderId` body `{ limitPrice }`：仅 `status==='open'` 且 `type==='limit'` 可改；重新校验价格合法性与涨跌停；改价后保持 open。
 - `POST /api/accounts/:id/positions/:symbol/protect` body `{ takeProfit?: number|null, stopLoss?: number|null }`：设置/清除持仓的止盈止损（价格方向必须合理：多仓 TP>现价>SL，空仓 TP<现价<SL，否则 `PROTECT_PRICE_INVALID`）。
-- `PATCH /api/accounts/:id` body `{ marginMode }`：仅当账户无任何持仓且无未成交委托时可切换，否则 `MARGIN_MODE_LOCKED`。
+- `PATCH /api/accounts/:id` body `{ name?, marginMode? }`：`name` 1–20 字符随时可改；`marginMode` 仅当账户无任何持仓且无未成交委托时可切换，否则 `MARGIN_MODE_LOCKED`。
+- 账户参数校验失败（如倍率调高后维持保证金率超上限）返回 400 `SETTINGS_INVALID`，message 会写明字段、当前值与上限（前端应把整段错误显示在设置弹层里，而不是只弹 toast）。
 
 ---
 
@@ -555,7 +556,7 @@ PUT  /api/watchlist   body { symbols:[...] } -> { symbols:[...] }
 
 GET  /api/accounts    -> { accounts:[{id,name,baseCurrency,initialCapital,createdAt,marginMode}] }
 POST /api/accounts    body { name, initialCapital, baseCurrency?, marginMode? } -> { account }
-PATCH /api/accounts/:id  body { marginMode:'isolated'|'cross' } -> { account }   // 有持仓/挂单时 409 MARGIN_MODE_LOCKED
+PATCH /api/accounts/:id  body { name?, marginMode:'isolated'|'cross' } -> { account }   // name 1–20 字符随时可改；marginMode 有持仓/挂单时 409 MARGIN_MODE_LOCKED
 POST /api/accounts/:id/reset  body { initialCapital } -> { account }
 DELETE /api/accounts/:id -> { ok:true }
 

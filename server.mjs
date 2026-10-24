@@ -154,6 +154,10 @@ function rangeCheck(errors, field, value, range) {
   }
 }
 
+function fmtPct(value) {
+  return `${(Number(value) * 100).toFixed(2).replace(/\.?0+$/, '')}%`;
+}
+
 function validateSettings(settings) {
   const errors = [];
   const ranges = SETTINGS_RANGES;
@@ -163,7 +167,9 @@ function validateSettings(settings) {
     const mmr = num(settings?.margin?.mmr?.[market], NaN);
     rangeCheck(errors, `margin.mmr.${market}`, mmr, ranges.margin?.mmr?.[market]);
     if (market !== 'cn' && Number.isFinite(mmr) && mmr > 0.9 / leverage[market]) {
-      errors.push(`margin.mmr.${market} 不能高于 0.9 / 杠杆上限(${leverage[market]}x)`);
+      errors.push(
+        `margin.mmr.${market} 当前 ${fmtPct(mmr)}，倍率 ${num(settings.leverageMultiplier, 1)}×（上限 ${leverage[market]}x）下最高 ${fmtPct(0.9 / leverage[market])}`,
+      );
     }
     rangeCheck(errors, `slippageBps.${market}`, num(settings?.slippageBps?.[market], NaN), ranges.slippageBps);
     rangeCheck(errors, `margin.interestAnnual.${market}`, num(settings?.margin?.interestAnnual?.[market], NaN), ranges.margin?.interestAnnual);
@@ -953,6 +959,7 @@ route('POST', /^\/api\/backup\/import$/, async (req, res) => {
 route('POST', /^\/api\/accounts$/, async (req, res) => {
   const body = await readJsonBody(req);
   const name = String(body.name || '').trim() || `账户 ${Object.keys(state.accounts).length + 1}`;
+  if (name.length > 20) throw httpError(400, 'NAME_INVALID', '账户名称需为 1–20 个字符');
   const initialCapital = Number(body.initialCapital);
   if (!Number.isFinite(initialCapital) || initialCapital < 1000 || initialCapital > 1_000_000_000) {
     throw httpError(400, 'CAPITAL_INVALID', '初始资金需在 1,000 – 1,000,000,000 之间');
@@ -1144,15 +1151,26 @@ route('PATCH', /^\/api\/accounts\/([^/]+)$/, async (req, res, url) => {
   const id = decodeURIComponent(url.pathname.split('/')[3]);
   const account = getAccountOr404(id);
   const body = await readJsonBody(req);
-  const mode = String(body.marginMode || '').toLowerCase();
-  if (mode !== 'isolated' && mode !== 'cross') {
-    throw httpError(400, 'MARGIN_MODE_INVALID', 'marginMode 只能是 isolated 或 cross');
+  let changed = false;
+  if (body.name !== undefined) {
+    const name = String(body.name).trim();
+    if (!name || name.length > 20) throw httpError(400, 'NAME_INVALID', '账户名称需为 1–20 个字符');
+    account.name = name;
+    changed = true;
   }
-  const result = engine.setMarginMode(account, mode);
-  if (!result?.ok) {
-    sendError(res, 409, result?.code || 'MARGIN_MODE_LOCKED', result?.message || '当前有持仓或挂单，无法切换保证金模式');
-    return;
+  if (body.marginMode !== undefined) {
+    const mode = String(body.marginMode || '').toLowerCase();
+    if (mode !== 'isolated' && mode !== 'cross') {
+      throw httpError(400, 'MARGIN_MODE_INVALID', 'marginMode 只能是 isolated 或 cross');
+    }
+    const result = engine.setMarginMode(account, mode);
+    if (!result?.ok) {
+      sendError(res, 409, result?.code || 'MARGIN_MODE_LOCKED', result?.message || '当前有持仓或挂单，无法切换保证金模式');
+      return;
+    }
+    changed = true;
   }
+  if (!changed) throw httpError(400, 'NOTHING_TO_UPDATE', '没有可更新的字段（支持 name / marginMode）');
   store.save();
   sendJson(res, 200, { account });
 });

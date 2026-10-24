@@ -1514,8 +1514,8 @@ input, select { font-family: inherit; }
 .multiplier-badge:hover { background: rgba(96, 165, 250, 0.18); }
 .ms-caps { color: var(--text-mute); }
 
-.modal-settings { width: min(900px, 94vw); max-height: 90vh; }
-.settings-body { overflow-y: auto; max-height: calc(90vh - 118px); }
+.modal-settings { width: min(900px, 94vw); max-height: 90vh; display: flex; flex-direction: column; }
+.settings-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-bottom: 10px; }
 .settings-section {
   border: 1px solid var(--border-soft);
   border-radius: 8px;
@@ -1695,3 +1695,30 @@ input, select { font-family: inherit; }
   .data-actions { grid-template-columns: 1fr; }
   .data-actions .btn:last-child { grid-column: auto; }
 }
+
+/* ------------------------------------------ account settings inline errors */
+
+.settings-clamp-note { color: #e6c777 !important; }
+#account-modal-error {
+  white-space: pre-line;
+  max-height: 150px;
+  overflow: auto;
+  line-height: 1.65;
+}
+.settings-field .cf-input input.is-invalid {
+  border-color: rgba(246, 70, 93, 0.85);
+  box-shadow: 0 0 0 1px rgba(246, 70, 93, 0.25) inset;
+}
+.sf-error {
+  display: block;
+  margin-top: 1px;
+  font-size: 9.5px;
+  line-height: 1.45;
+  color: #ff9aa6;
+  white-space: pre-line;
+}
+
+.account-modal-error { flex: 0 0 auto; margin: 0 16px 10px; }
+
+@media (max-width: 720px) { .settings-body { flex: 1 1 auto; max-height: none; } .modal-settings { display: flex; } }
+

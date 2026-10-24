@@ -150,5 +150,14 @@
   - 导入的账户要按 bootstrap 规则补 `settings/marginMode` 等新字段，否则旧备份恢复后账户参数会缺。
 - 传输层细节：导出用 `Content-Disposition: attachment` 让浏览器直接下载、文件名由服务端给；导入走 JSON body，把 `readJsonBody` 上限调到 30MB（带成交历史的账户会比较大）。
 
+## 15. 「有时无法创建/修改账户」的两个真实原因（v1.2.1）
+
+1. **倍率与维持保证金率联动校验**：倍率调高后 `0.9 / 实际杠杆上限` 变小，而表单里还留着默认 mmr（hk/us 5%、fx 0.25%），提交即 400。用户看到的是「创建失败」，但错误提示只弹了截断 toast，等于没有原因。
+   - 修法：前端在倍率变化时自动把 mmr 夹紧到上限并给出提示；手动超限时输入框内联报错；提交前做本地校验，服务端 400 message 一次性列全（字段、当前值、上限），弹层内多行显示错误且不关闭。
+   - 教训：**参数之间有关联约束时，UI 不能只做单字段范围校验**，否则默认值组合会天然非法。
+2. **没有改名入口**：`PATCH /api/accounts/:id` 之前只处理 `marginMode`，用户想改账户名无路可走（传 name 还会报 `MARGIN_MODE_INVALID`）。现在支持 `{name?, marginMode?}`（name 1–20 字符，随时可改；有持仓不影响改名）。
+   - 写 API 时「可选字段」要显式处理：`if (body.name !== undefined)`，否则空 patch 会误报；空 patch 现在返回 `NOTHING_TO_UPDATE`。
+
+
 
 

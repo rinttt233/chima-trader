@@ -166,6 +166,30 @@ async function main() {
     const accountId = created.body?.account?.id;
     if (!accountId) throw new Error('no account id returned');
 
+    const renamed = await api(`/api/accounts/${accountId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: '冒烟测试账户-改名' }),
+    });
+    check('PATCH /api/accounts/:id renames the account',
+      renamed.status === 200 && renamed.body?.account?.name === '冒烟测试账户-改名',
+      `name=${renamed.body?.account?.name}`);
+    const renameBad = await api(`/api/accounts/${accountId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name: 'x'.repeat(21) }),
+    });
+    check('account name length is validated', renameBad.status === 400 && renameBad.body?.error?.code === 'NAME_INVALID',
+      `status=${renameBad.status}`);
+
+    const multiplierTooHigh = await api(`/api/accounts/${accountId}/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify({ settings: { leverageMultiplier: 2 } }),
+    });
+    check('invalid margin settings explain the limit',
+      multiplierTooHigh.status === 400
+        && multiplierTooHigh.body?.error?.code === 'SETTINGS_INVALID'
+        && String(multiplierTooHigh.body?.error?.message || '').includes('最高'),
+      String(multiplierTooHigh.body?.error?.message || '').slice(0, 80));
+
     const snapshot = await api(`/api/accounts/${accountId}`);
     check('GET /api/accounts/:id snapshot has cash/equity',
       snapshot.status === 200 && snapshot.body?.cash && snapshot.body?.equity,

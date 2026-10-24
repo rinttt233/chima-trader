@@ -1510,6 +1510,7 @@
     ORDER_NOT_FOUND: '委托不存在或已成交/撤销',
     SETTINGS_LOCKED: '有持仓或挂单时不能修改杠杆倍率 / 维持保证金率',
     SETTINGS_INVALID: '账户参数不合法，请检查数值范围',
+    NAME_INVALID: '账户名称需为 1–20 个字符',
     ACCOUNT_NOT_FOUND: '账户不存在'
   };
 
@@ -2258,6 +2259,115 @@
     return num;
   }
 
+  function currentSettingsMultiplier() {
+    var range = $('#settings-mult-range');
+    var value = range ? Number(range.value) : 1;
+    return isFinite(value) ? value : 1;
+  }
+
+  function mmrCapFor(market, multiplier) {
+    if (market === 'cn') return 1;
+    var lev = multiplierLeverage(market, multiplier);
+    return lev > 0 ? 0.9 / lev : 1;
+  }
+
+  function settingsMmrCapsText(multiplier) {
+    var hk = mmrCapFor('hk', multiplier);
+    var us = mmrCapFor('us', multiplier);
+    var fx = mmrCapFor('fx', multiplier);
+    var crypto = mmrCapFor('crypto', multiplier);
+    var hkUs = hk === us
+      ? '港股/美股 ' + formatRatePercent(hk * 100)
+      : '港股 ' + formatRatePercent(hk * 100) + '、美股 ' + formatRatePercent(us * 100);
+    return hkUs + '、外汇 ' + formatRatePercent(fx * 100) + '、加密 ' + formatRatePercent(crypto * 100);
+  }
+
+  function validateSettingsField(input) {
+    if (!input || input.disabled) return null;
+    var path = input.getAttribute('data-setting-path');
+    var field = settingsFieldByPath(path);
+    if (!field || field.kind === 'bool') return null;
+    var raw = Number(input.value);
+    var value = field.kind === 'pct' ? raw / 100 : raw;
+    var error = '';
+    if (!isFinite(raw)) {
+      error = '请输入有效数字';
+    } else {
+      var range = settingsFieldRange(field);
+      if (range && (value < range[0] - 1e-12 || value > range[1] + 1e-12)) {
+        error = '需在 ' + formatSettingsValue(field, range[0]) + ' – ' + formatSettingsValue(field, range[1]) + ' 之间';
+      }
+      if (!error && field.path.indexOf('margin.mmr.') === 0 && field.market) {
+        var mult = currentSettingsMultiplier();
+        var cap = mmrCapFor(field.market, mult);
+        if (value > cap + 1e-12) {
+          error = '当前倍率下最高 ' + formatRatePercent(cap * 100) +
+            '（0.9 ÷ ' + multiplierLeverage(field.market, mult) + 'x）';
+        }
+      }
+    }
+    input.classList.toggle('is-invalid', !!error);
+    var errorEl = document.querySelector('#account-settings-fields [data-setting-error="' + path + '"]');
+    if (errorEl) {
+      errorEl.hidden = !error;
+      errorEl.textContent = error;
+    }
+    return error;
+  }
+
+  function validateAllSettingsFields() {
+    var errors = [];
+    $$('#account-settings-fields [data-setting-path]').forEach(function (input) {
+      var field = settingsFieldByPath(input.getAttribute('data-setting-path'));
+      var error = validateSettingsField(input);
+      if (error && field) errors.push(field.label + '：' + error);
+    });
+    return errors;
+  }
+
+  function clampMmrToMultiplier(multiplier) {
+    var adjusted = [];
+    ['hk', 'us', 'fx', 'crypto'].forEach(function (market) {
+      var path = 'margin.mmr.' + market;
+      var input = document.querySelector('#account-settings-fields [data-setting-path="' + path + '"]');
+      if (!input || input.disabled) return;
+      var field = settingsFieldByPath(path);
+      if (!field) return;
+      var cap = mmrCapFor(market, multiplier);
+      var value = settingInputToValue(field, input.value);
+      if (isFinite(value) && value > cap + 1e-12) {
+        input.value = settingDisplayInputValue(field, cap);
+        adjusted.push(market);
+      }
+      validateSettingsField(input);
+    });
+    return adjusted;
+  }
+
+  function refreshMmrClampNote(multiplier, adjusted) {
+    var note = $('#settings-mmr-clamp-note');
+    if (!note) return;
+    var caps = settingsMmrCapsText(multiplier);
+    if (adjusted && adjusted.length) {
+      var names = adjusted.map(function (market) {
+        return market === 'hk' ? '港股' : market === 'us' ? '美股' : market === 'fx' ? '外汇' : '加密';
+      });
+      note.textContent = '已按倍率把维持保证金率上限调整为 ' + caps + '（自动夹紧：' + names.join('、') + '）';
+    } else {
+      note.textContent = '当前倍率下维持保证金率上限：' + caps;
+    }
+    note.hidden = false;
+  }
+
+  function onSettingsMultiplierChanged() {
+    state.settingsPreset = null;
+    state.settingsFormDirty = true;
+    var multiplier = currentSettingsMultiplier();
+    var adjusted = clampMmrToMultiplier(multiplier);
+    updateSettingsMultiplierUI();
+    refreshMmrClampNote(multiplier, adjusted);
+  }
+
   function renderSettingsFields(settings) {
     var host = $('#account-settings-fields');
     if (!host) return;
@@ -2285,7 +2395,7 @@
             ' step="any"' + (disabled ? ' disabled' : '') + '>' +
             (field.unit ? '<span class="sf-unit">' + escapeHtml(field.unit) + '</span>' : '') +
             '<button type="button" class="field-reset" data-setting-reset="' + escapeHtml(field.path) + '" title="恢复推荐值"' + (disabled ? ' disabled' : '') + '>↺</button>' +
-            '</div></label>';
+            '</div><em class="sf-error" data-setting-error="' + escapeHtml(field.path) + '" hidden></em></label>';
         }).join('');
         return (group.sub ? '<div class="settings-subhead">' + escapeHtml(group.sub) + '</div>' : '') +
           '<div class="settings-grid">' + rows + '</div>';
@@ -2321,32 +2431,37 @@
   }
 
   function settingsValidate(settings) {
-    var err = null;
+    var errors = [];
+    var add = function (message) {
+      if (message && errors.indexOf(message) < 0) errors.push(message);
+    };
     settingsFieldsFlat().forEach(function (field) {
-      if (err || field.kind === 'bool') return;
+      if (field.kind === 'bool') return;
       var value = Number(getPath(settings, field.path));
-      if (!isFinite(value)) { err = field.label + ' 不是有效数字'; return; }
+      if (!isFinite(value)) {
+        add(field.label + ' 不是有效数字');
+        return;
+      }
       var range = settingsFieldRange(field);
       if (range && (value < range[0] - 1e-12 || value > range[1] + 1e-12)) {
-        err = field.label + ' 超出范围（' + formatSettingsValue(field, range[0]) + ' – ' + formatSettingsValue(field, range[1]) + '）';
+        add(field.label + ' 超出范围（' + formatSettingsValue(field, range[0]) + ' – ' + formatSettingsValue(field, range[1]) + '）');
       }
     });
-    if (err) return err;
     var multRange = (settingsMeta().multiplier && settingsMeta().multiplier.range) || [0.1, 2];
     if (settings.leverageMultiplier < multRange[0] - 1e-9 || settings.leverageMultiplier > multRange[1] + 1e-9) {
-      return '杠杆上限倍率需在 ' + multRange[0] + '× – ' + multRange[1] + '× 之间';
+      add('杠杆上限倍率需在 ' + multRange[0] + '× – ' + multRange[1] + '× 之间');
     }
-    var markets = ['hk', 'us', 'fx', 'crypto'];
-    for (var i = 0; i < markets.length; i++) {
-      var market = markets[i];
+    ['hk', 'us', 'fx', 'crypto'].forEach(function (market) {
       var mmr = Number(getPath(settings, 'margin.mmr.' + market));
       var lev = multiplierLeverage(market, settings.leverageMultiplier);
-      if (isFinite(mmr) && mmr > 0.9 / lev + 1e-12) {
-        return (market === 'hk' ? '港股' : market === 'us' ? '美股' : market === 'fx' ? '外汇' : '加密') +
-          '维持保证金率过高：需 ≤ 0.9 / 杠杆上限 ' + lev + 'x，即 ≤ ' + formatRatePercent((0.9 / lev) * 100);
+      var cap = 0.9 / lev;
+      if (isFinite(mmr) && mmr > cap + 1e-12) {
+        add((market === 'hk' ? '港股' : market === 'us' ? '美股' : market === 'fx' ? '外汇' : '加密') +
+          '维持保证金率过高：当前倍率下需 ≤ ' + formatRatePercent(cap * 100) +
+          '（0.9 ÷ 杠杆上限 ' + lev + 'x）');
       }
-    }
-    return null;
+    });
+    return errors;
   }
 
   function updateSettingsMultiplierUI() {
@@ -2378,8 +2493,7 @@
     var range = $('#settings-mult-range');
     if (!range) return;
     range.value = String(value);
-    state.settingsPreset = null;
-    updateSettingsMultiplierUI();
+    onSettingsMultiplierChanged();
   }
 
   function updateSettingsLockUI() {
@@ -2404,6 +2518,7 @@
     updateSettingsMultiplierUI();
     renderSettingsFields(settings);
     updateSettingsLockUI();
+    validateAllSettingsFields();
   }
 
   function applySettingsPreset(name) {
@@ -2420,25 +2535,34 @@
       });
     }
     setSettingsForm(current);
+    var adjusted = clampMmrToMultiplier(current.leverageMultiplier);
     updateSettingsMultiplierUI();
+    refreshMmrClampNote(current.leverageMultiplier, adjusted);
   }
 
   function resetSettingsToDefaults() {
+    var multiplier = currentSettingsMultiplier();
     if (state.settingsLocked) {
       // Fees / slippage / conversion are still editable even with positions.
-      var current = readSettingsForm(defaultSettingsDeep());
+      var current = readSettingsForm(mergeDeep(defaultSettingsDeep(), state.view.settings || {}));
+      current.leverageMultiplier = multiplier;
       var defaults = defaultSettingsDeep();
       ['fees', 'slippageBps', 'autoConvert', 'fxConvertSpread'].forEach(function (key) {
         current[key] = cloneDeep(defaults[key]);
       });
       setSettingsForm(current);
-      state.settingsPreset = 'recommended';
+      state.settingsPreset = multiplier === 1 ? 'recommended' : null;
       updateSettingsMultiplierUI();
+      refreshMmrClampNote(multiplier, []);
       return;
     }
-    setSettingsForm(defaultSettingsDeep());
-    state.settingsPreset = 'recommended';
+    var reset = defaultSettingsDeep();
+    reset.leverageMultiplier = multiplier;
+    setSettingsForm(reset);
+    state.settingsPreset = multiplier === 1 ? 'recommended' : null;
+    var adjusted = clampMmrToMultiplier(multiplier);
     updateSettingsMultiplierUI();
+    refreshMmrClampNote(multiplier, adjusted);
   }
 
   function renderSettingsPresets() {
@@ -2453,15 +2577,20 @@
     updateSettingsMultiplierUI();
   }
 
-  function setBasicAccountFieldsEnabled(enabled) {
-    ['#new-account-name', '#new-account-capital', '#new-account-currency', '#new-account-margin-mode'].forEach(function (selector) {
+  function setBasicAccountFieldsEnabled(enabled, allowName) {
+    var nameInput = $('#new-account-name');
+    if (nameInput) nameInput.disabled = !enabled && !allowName;
+    ['#new-account-capital', '#new-account-currency', '#new-account-margin-mode'].forEach(function (selector) {
       var el = $(selector);
       if (el) el.disabled = !enabled;
     });
     var note = $('#settings-basic-note');
     if (note) {
       note.hidden = enabled;
-      note.textContent = enabled ? '' : '账户名称 / 初始资金 / 基础币种 / 保证金模式创建后不可修改；保证金模式请用上方「切换模式」。';
+      note.textContent = enabled ? ''
+        : allowName
+          ? '账户名称可修改；初始资金 / 基础币种 / 保证金模式创建后不可修改（保证金模式请用上方「切换模式」）。'
+          : '账户名称 / 初始资金 / 基础币种 / 保证金模式创建后不可修改；保证金模式请用上方「切换模式」。';
     }
   }
 
@@ -2482,6 +2611,8 @@
     var modal = $('#modal-account');
     if (!modal) return;
     modal.hidden = false;
+    var clampNote = $('#settings-mmr-clamp-note');
+    if (clampNote) clampNote.hidden = true;
     setText('#modal-account-title', '账户设置');
     setText('#account-modal-hint', '调整账户「' + (account.name || '') + '」的杠杆倍率、费率、滑点与保证金参数；仅影响之后的成交与风控计算。');
     setText('#btn-create-account', '保存设置');
@@ -2494,7 +2625,7 @@
     updateCapitalUnit();
     var modeSel = $('#new-account-margin-mode');
     if (modeSel) modeSel.value = account.marginMode || 'isolated';
-    setBasicAccountFieldsEnabled(false);
+    setBasicAccountFieldsEnabled(false, true);
     var cancelBtn = $('#btn-cancel-account');
     if (cancelBtn) cancelBtn.hidden = false;
     var closeBtn = $('#modal-account [data-close-modal]');
@@ -2514,6 +2645,8 @@
     var modal = $('#modal-account');
     if (!modal) return;
     modal.hidden = false;
+    var clampNote = $('#settings-mmr-clamp-note');
+    if (clampNote) clampNote.hidden = true;
     setText('#account-modal-hint', required
       ? '欢迎使用 千亦所 ChimaTrader。请先创建一个模拟账户，所有交易均使用虚拟资金。'
       : '创建一个新的模拟账户，可自定义费率、滑点、保证金与杠杆上限倍率。');
@@ -2542,32 +2675,83 @@
     if (nameInput) setTimeout(function () { nameInput.focus(); }, 40);
   }
 
+  function showAccountModalError(message) {
+    showFormError('#account-modal-error', message);
+    var body = $('#modal-account .modal-body');
+    var errorEl = $('#account-modal-error');
+    var reveal = function () {
+      if (body) body.scrollTop = body.scrollHeight;
+      if (errorEl && errorEl.scrollIntoView) {
+        try { errorEl.scrollIntoView({ block: 'center' }); } catch (e) { /* older browser */ }
+      }
+    };
+    reveal();
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(reveal);
+    setTimeout(reveal, 60);
+  }
+
+  function settingsPayloadChanged(payload, current) {
+    if (!current) return true;
+    return Object.keys(payload).some(function (key) {
+      return JSON.stringify(payload[key]) !== JSON.stringify(current[key]);
+    });
+  }
+
   async function submitAccountSettings() {
     var createMode = state.settingsMode === 'create';
     var name = ($('#new-account-name').value || '').trim();
     var capital = Number($('#new-account-capital').value);
-    var capitalRange = (settingsMeta().ranges && settingsMeta().ranges.initialCapital) || [1000, 1000000000];
+    var errors = [];
     if (createMode) {
+      var capitalRange = (settingsMeta().ranges && settingsMeta().ranges.initialCapital) || [1000, 1000000000];
       if (!(capital >= capitalRange[0] && capital <= capitalRange[1])) {
-        showFormError('#account-modal-error', '初始资金需在 ' + fmtNumber(capitalRange[0], 0, 0) + ' – ' + fmtNumber(capitalRange[1], 0, 0) + ' 之间');
-        return;
+        errors.push('初始资金需在 ' + fmtNumber(capitalRange[0], 0, 0) + ' – ' + fmtNumber(capitalRange[1], 0, 0) + ' 之间');
       }
+      if (name.length > 20) errors.push('账户名称需为 1–20 个字符');
       if (!name) name = '模拟账户' + (state.accounts.length + 1);
+    } else if (!name) {
+      errors.push('账户名称不能为空');
+    } else if (name.length > 20) {
+      errors.push('账户名称需为 1–20 个字符');
     }
-    var multiplierInput = $('#settings-mult-range');
-    var multiplier = multiplierInput ? Number(multiplierInput.value) : 1;
+    var multiplier = currentSettingsMultiplier();
     var base = createMode ? defaultSettingsDeep() : mergeDeep(defaultSettingsDeep(), state.view.settings || {});
     var draft = readSettingsForm(base);
     draft.leverageMultiplier = multiplier;
-    var validationError = settingsValidate(draft);
-    if (validationError) {
-      showFormError('#account-modal-error', validationError);
+    settingsValidate(draft).forEach(function (message) {
+      if (errors.indexOf(message) < 0) errors.push(message);
+    });
+    if (errors.length) {
+      showAccountModalError(errors.join('\n'));
       return;
     }
+
+    var nameChanged = false;
+    var settingsChanged = false;
+    var payload = null;
+    if (!createMode) {
+      nameChanged = name !== ((state.view.account && state.view.account.name) || '');
+      if (state.settingsLocked) {
+        payload = {
+          fees: draft.fees,
+          slippageBps: draft.slippageBps,
+          autoConvert: draft.autoConvert,
+          fxConvertSpread: draft.fxConvertSpread
+        };
+      } else {
+        payload = draft;
+      }
+      var currentSettings = mergeDeep(defaultSettingsDeep(), state.view.settings || {});
+      settingsChanged = settingsPayloadChanged(payload, currentSettings);
+      if (!nameChanged && !settingsChanged) {
+        showToast('没有需要保存的修改', 'warn');
+        return;
+      }
+    }
+
     hideFormError('#account-modal-error');
     var btn = $('#btn-create-account');
     btn.disabled = true;
-    var epoch = state.accountEpoch;
     try {
       if (createMode) {
         var body = {
@@ -2591,33 +2775,34 @@
           }, 500);
         }
       } else {
-        var payload;
-        if (state.settingsLocked) {
-          payload = {
-            fees: draft.fees,
-            slippageBps: draft.slippageBps,
-            autoConvert: draft.autoConvert,
-            fxConvertSpread: draft.fxConvertSpread
-          };
-        } else {
-          payload = draft;
+        if (nameChanged) {
+          await api('/api/accounts/' + encodeURIComponent(state.accountId), {
+            method: 'PATCH', body: { name: name }
+          });
         }
-        await api('/api/accounts/' + encodeURIComponent(state.accountId) + '/settings', {
-          method: 'PATCH', body: { settings: payload }
-        });
+        if (settingsChanged) {
+          await api('/api/accounts/' + encodeURIComponent(state.accountId) + '/settings', {
+            method: 'PATCH', body: { settings: payload }
+          });
+        }
         closeModal('modal-account');
-        showToast('账户参数已保存', 'success');
+        showToast(nameChanged && settingsChanged ? '账户名称和参数已保存'
+          : nameChanged ? '账户名称已更新' : '账户参数已保存', 'success');
         await refreshAccounts(state.accountId);
         state.auxLoadedAt = 0;
         loadActiveTabData();
       }
     } catch (err) {
-      var message = orderErrorMessage(err);
-      if (err && err.code === 'SETTINGS_LOCKED') message = '有持仓或挂单时不能修改杠杆倍率 / 保证金参数，请先平仓并撤单';
-      showFormError('#account-modal-error', message);
+      var message;
+      if (err && err.code === 'SETTINGS_INVALID') message = errorText(err);
+      else if (err && err.code === 'NAME_INVALID') message = '账户名称需为 1–20 个字符' + (errorText(err) ? '（' + errorText(err) + '）' : '');
+      else if (err && err.code === 'SETTINGS_LOCKED') message = '有持仓或挂单时不能修改杠杆倍率 / 保证金参数，请先平仓并撤单';
+      else message = orderErrorMessage(err);
+      // Backend may return a multi-line SETTINGS_INVALID message for every bad
+      // field; keep the modal open and show the complete text.
+      showAccountModalError(message);
     } finally {
       btn.disabled = false;
-      if (epoch !== state.accountEpoch && !createMode) { /* refresh handled elsewhere */ }
     }
   }
 
@@ -5363,9 +5548,7 @@
       if (btn) applySettingsPreset(btn.getAttribute('data-preset'));
     });
     on($('#settings-mult-range'), 'input', function () {
-      state.settingsPreset = null;
-      state.settingsFormDirty = true;
-      updateSettingsMultiplierUI();
+      onSettingsMultiplierChanged();
     });
     on($('#settings-mult-quick'), 'click', function (event) {
       var btn = event.target.closest('[data-mult]');
@@ -5374,7 +5557,9 @@
       setMultiplierValue(Number(btn.getAttribute('data-mult')));
     });
     on($('#btn-settings-reset-all'), 'click', resetSettingsToDefaults);
-    on($('#account-settings-fields'), 'input', function () {
+    on($('#account-settings-fields'), 'input', function (event) {
+      var input = event.target.closest('[data-setting-path]');
+      if (input) validateSettingsField(input);
       state.settingsPreset = null;
       state.settingsFormDirty = true;
       updateSettingsMultiplierUI();
@@ -5387,16 +5572,26 @@
       var input = document.querySelector('#account-settings-fields [data-setting-path="' + path + '"]');
       if (!field || !input) return;
       var value = getPath(defaultSettingsDeep(), path);
+      var adjusted = [];
+      if (path.indexOf('margin.mmr.') === 0 && field.market) {
+        var cap = mmrCapFor(field.market, currentSettingsMultiplier());
+        if (Number(value) > cap + 1e-12) {
+          value = cap;
+          adjusted.push(field.market);
+        }
+      }
       input.value = settingDisplayInputValue(field, value);
+      validateSettingsField(input);
       state.settingsPreset = null;
       state.settingsFormDirty = true;
       updateSettingsMultiplierUI();
+      if (adjusted.length) refreshMmrClampNote(currentSettingsMultiplier(), adjusted);
     });
     on($('#new-account-capital'), 'keydown', function (event) {
-      if (event.key === 'Enter') submitCreateAccount();
+      if (event.key === 'Enter') submitAccountSettings();
     });
     on($('#new-account-name'), 'keydown', function (event) {
-      if (event.key === 'Enter') submitCreateAccount();
+      if (event.key === 'Enter') submitAccountSettings();
     });
     on($('#btn-cancel-reset'), 'click', function () { closeModal('modal-reset'); });
     on($('#btn-confirm-reset'), 'click', submitResetAccount);
