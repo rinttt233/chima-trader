@@ -1,0 +1,15 @@
+# runtime data (accounts, orders, trades)
+data/
+temp/
+
+# logs
+*.log
+boot.log
+boot.err.log
+
+# editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+node_modules/

@@ -1,0 +1,129 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787
+  },
+  "dataDir": "data",
+  "proxy": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 65532,
+    "hosts": ["api.binance.com", "api.coingecko.com", "query1.finance.yahoo.com", "query2.finance.yahoo.com"]
+  },
+  "defaults": {
+    "initialCapital": 1000000,
+    "baseCurrency": "CNY",
+    "watchlist": [
+      "cn:sh600519",
+      "cn:sz300750",
+      "cn:sh601318",
+      "hk:hk00700",
+      "us:usAAPL",
+      "us:usNVDA",
+      "fx:EURUSD",
+      "fx:XAUUSD",
+      "crypto:BTCUSDT",
+      "crypto:ETHUSDT"
+    ]
+  },
+  "refresh": {
+    "quotesMs": 2000,
+    "tickMs": 2000,
+    "equitySnapshotMs": 60000,
+    "stream": {
+      "cryptoMs": 500,
+      "fxMs": 1000,
+      "stockMs": 2000,
+      "heartbeatMs": 15000
+    }
+  },
+  "fees": {
+    "cn": {
+      "commissionRate": 0.00025,
+      "commissionMin": 5,
+      "stampDutyRate": 0.0005,
+      "stampDutySide": "sell",
+      "transferFeeRate": 0.00001
+    },
+    "hk": {
+      "commissionRate": 0.00025,
+      "commissionMin": 100,
+      "stampDutyRate": 0.001,
+      "stampDutySide": "both",
+      "exchangeFeeRate": 0.0000565,
+      "settlementFeeRate": 0.00002
+    },
+    "us": {
+      "perShare": 0.005,
+      "commissionMin": 1,
+      "secFeeRate": 0.0000278,
+      "secFeeSide": "sell"
+    },
+    "fx": {
+      "spreadBps": 1.5,
+      "commissionRate": 0
+    },
+    "crypto": {
+      "commissionRate": 0.001
+    }
+  },
+  "slippageBps": {
+    "cn": 1,
+    "hk": 1,
+    "us": 1,
+    "fx": 2,
+    "crypto": 3
+  },
+  "lots": {
+    "cn": 100,
+    "hk": 100,
+    "us": 1,
+    "fx": 0.01,
+    "crypto": 0.0001
+  },
+  "leverage": {
+    "cn": 1,
+    "hk": 4,
+    "us": 4,
+    "fx": 100,
+    "crypto": 20
+  },
+  "margin": {
+    "mmr": {
+      "cn": 1,
+      "hk": 0.125,
+      "us": 0.125,
+      "fx": 0.005,
+      "crypto": 0.005
+    },
+    "interestAnnual": {
+      "cn": 0,
+      "hk": 0.06,
+      "us": 0.06,
+      "fx": 0.03,
+      "crypto": 0.08
+    },
+    "liquidationFeeRate": {
+      "cn": 0,
+      "hk": 0.002,
+      "us": 0.002,
+      "fx": 0,
+      "crypto": 0.005
+    }
+  },
+  "autoConvert": true,
+  "fxConvertSpread": 0.003,
+  "sessions": {
+    "cn": [
+      { "start": "09:30", "end": "11:30", "tz": "Asia/Shanghai" },
+      { "start": "13:00", "end": "15:00", "tz": "Asia/Shanghai" }
+    ],
+    "hk": [
+      { "start": "09:30", "end": "12:00", "tz": "Asia/Hong_Kong" },
+      { "start": "13:00", "end": "16:00", "tz": "Asia/Hong_Kong" }
+    ],
+    "us": [
+      { "start": "09:30", "end": "16:00", "tz": "America/New_York" }
+    ]
+  }
+}
