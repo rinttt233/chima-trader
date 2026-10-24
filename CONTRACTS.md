@@ -383,6 +383,80 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 
 ---
 
+## 6B. 账户级交易参数（v3）
+
+账户可覆盖全局 `config.json` 的费率 / 杠杆 / 保证金参数：创建账户时设置，创建后可在「账户设置」修改。缺省键一律回落到全局配置。
+
+### 6B.1 数据结构
+
+`account.settings`：
+
+```js
+{
+  leverageMultiplier: 1,        // 杠杆上限倍率：0.1 – 2.0，按市场基准杠杆换算（见 6B.1a）
+  fees: { cn:{...}, hk:{...}, us:{...}, fx:{...}, crypto:{...} },   // 结构同 config.fees
+  slippageBps: { cn:1, hk:1, us:1, fx:2, crypto:3 },
+  margin: {
+    mmr: { cn:1, hk:0.05, us:0.05, fx:0.0025, crypto:0.005 },
+    interestAnnual: { cn:0, hk:0.06, us:0.06, fx:0.03, crypto:0.08 },
+    liquidationFeeRate: { cn:0, hk:0.002, us:0.002, fx:0, crypto:0.005 }
+  },
+  autoConvert: true,
+  fxConvertSpread: 0.003
+}
+```
+
+### 6B.1a 杠杆上限的换算
+
+- 市场基准杠杆 `base` = `config.json` 的 `leverage`（cn 1 / hk 10 / us 10 / fx 200 / crypto 100）。
+- 账户某市场实际杠杆上限 = `clamp(round(base × leverageMultiplier), 1, 系统上限)`；系统上限：cn 1 / hk 20 / us 20 / fx 500 / crypto 125。
+- 例：倍率 0.1 → 加密 10x / 外汇 20x / 港美 1x；倍率 1 → 100x / 200x / 10x；倍率 2 → 加密 125x（截断）/ 外汇 400x / 港美 20x。
+- A 股恒为 1x，不受倍率影响。
+
+服务端把 `account.settings` 深合并到全局配置上得到 **effective cfg**（其中 `leverage` 为换算后的各市场上限），用它调用 engine 的 `placeOrder / tickAccount / checkRisk / portfolioView`。`GET /api/accounts/:id` 返回 `settings` 与 `effective`（实际生效参数，含换算后的 leverage 与费率）。
+
+### 6B.2 校验范围（服务端强制；前端按 `/api/settings/meta` 渲染）
+
+| 字段 | 范围 |
+|---|---|
+| 初始资金 | 1,000 – 1,000,000,000 |
+| leverageMultiplier | 0.1 – 2.0（系统上限仍会截断：hk/us 20、fx 500、crypto 125、cn 1） |
+| fees.commissionRate | 0 – 0.005 |
+| fees.commissionMin | 0 – 500 |
+| stampDutyRate / transferFeeRate / exchangeFeeRate / settlementFeeRate / secFeeRate | 0 – 0.001 |
+| fees.perShare | 0 – 0.1 |
+| fees.spreadBps | 0 – 100 |
+| slippageBps | 0 – 200 |
+| margin.mmr | cn 1；hk/us 0.005–0.5；fx/crypto 0.0005–0.1；且必须满足 `mmr <= 0.9 / 该市场实际杠杆上限` |
+| margin.interestAnnual | 0 – 0.5 |
+| margin.liquidationFeeRate | 0 – 0.05 |
+| fxConvertSpread | 0 – 0.02 |
+
+- `leverageMultiplier` 与 `margin.mmr` 是风险参数：有持仓或未成交委托时禁止修改（`SETTINGS_LOCKED`，HTTP 409）。
+- `fees / slippageBps / autoConvert / fxConvertSpread` 随时可改，只影响之后的成交。
+- 全局 `config.json` 的值仍是默认值；`/api/markets.maxLeverage` 表示系统允许的档位上限。
+
+### 6B.3 接口
+
+```
+GET  /api/settings/meta
+   -> { markets:[{id,name,currency,baseLeverage,maxLeverageCeiling,shortable}],
+        ranges:{...}, presets:{ conservative:{...}, recommended:{...}, aggressive:{...} },
+        multiplier:{ range:[0.1,2], default:1, quick:[0.1,0.25,0.5,1,2] },
+        defaults:{ settings, initialCapital, baseCurrency } }
+
+POST /api/accounts                    body { name, initialCapital, baseCurrency?, marginMode?, settings? } -> { account }
+PATCH /api/accounts/:id/settings      body { settings } -> { account }   // 部分合并；风险参数有持仓/挂单时 409
+```
+
+### 6B.4 推荐值
+
+- 杠杆上限倍率：**1×（推荐）** → cn 1 / hk 10 / us 10 / fx 200 / crypto 100；0.1× 保守（加密 10x / 外汇 20x / 港美 1x）；2× 激进（加密 125x / 外汇 400x / 港美 20x，按上限截断）
+- 维持保证金率：cn 1 / hk 5% / us 5% / fx 0.25% / crypto 0.5%
+- 费率与 §6.2 相同；滑点 cn/hk/us 1bp、fx 2bp、crypto 3bp；借币年化 crypto 8%、fx 3%、hk/us 6%；强平费 crypto 0.5%、hk/us 0.2%、fx 0；换汇成本 0.3%
+
+---
+
 ## 7. REST API（Lead 在 server.mjs 实现）
 
 所有响应 JSON。错误：HTTP 4xx/5xx + `{ "error": { "code": "XXX", "message": "中文说明" } }`。

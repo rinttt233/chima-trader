@@ -25,6 +25,7 @@
       <select id="account-select" aria-label="选择交易账户"></select>
     </label>
     <button type="button" class="btn btn-ghost" id="btn-new-account">新建账户</button>
+    <button type="button" class="btn btn-ghost" id="btn-account-settings">账户设置</button>
     <button type="button" class="btn btn-ghost" id="btn-reset-account">重置账户</button>
     <button type="button" class="btn btn-ghost btn-help" id="btn-help" title="新手帮助与术语速查">帮助</button>
   </div>
@@ -55,6 +56,8 @@
 
 <div class="margin-strip" id="margin-strip" hidden>
   <button type="button" class="margin-mode-badge" id="margin-mode-badge" title="点击切换保证金模式">逐仓</button>
+  <button type="button" class="multiplier-badge" id="account-multiplier-badge" title="账户杠杆上限倍率，点击打开账户设置">倍率 ×1</button>
+  <span class="ms-item ms-caps" id="account-leverage-caps">--</span>
   <span class="ms-item">保证金占用 <b class="num" id="margin-used">--</b></span>
   <span class="ms-item">可用保证金 <b class="num" id="margin-available">--</b></span>
   <span class="ms-item">账户风险率 <b class="num" id="account-risk">--</b></span>
@@ -375,21 +378,72 @@
 </section>
 
 <div class="modal-backdrop" id="modal-account" hidden>
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-account-title">
+  <div class="modal modal-wide modal-settings" role="dialog" aria-modal="true" aria-labelledby="modal-account-title">
     <div class="modal-head">
       <h2 id="modal-account-title">新建模拟账户</h2>
       <button type="button" class="icon-btn" data-close-modal="modal-account" aria-label="关闭">×</button>
     </div>
-    <div class="modal-body">
+    <div class="modal-body settings-body">
       <p class="modal-hint" id="account-modal-hint">请先创建一个模拟账户，所有交易均使用虚拟资金。</p>
-      <label class="form-row">
-        <span class="form-label">账户名称</span>
-        <div class="input-wrap"><input id="new-account-name" type="text" maxlength="20" placeholder="如：主账户"></div>
-      </label>
-      <label class="form-row">
-        <span class="form-label">初始资金 (CNY)</span>
-        <div class="input-wrap"><input id="new-account-capital" type="number" min="1000" step="10000" value="1000000"></div>
-      </label>
+
+      <div class="settings-section">
+        <div class="settings-head"><h3 class="settings-title">基本信息</h3></div>
+        <div class="settings-basic-grid">
+          <label class="settings-field">
+            <span class="sf-label">账户名称</span>
+            <div class="cf-input"><input id="new-account-name" type="text" maxlength="20" placeholder="如：主账户"></div>
+          </label>
+          <label class="settings-field">
+            <span class="sf-label">初始资金</span>
+            <div class="cf-input"><input id="new-account-capital" type="number" min="1000" step="10000" value="1000000"><span class="sf-unit" id="account-capital-unit">CNY</span></div>
+          </label>
+          <label class="settings-field" id="field-account-currency">
+            <span class="sf-label">基础币种 <em>创建后不可改</em></span>
+            <div class="cf-input">
+              <select id="new-account-currency">
+                <option value="CNY">CNY 人民币</option>
+                <option value="HKD">HKD 港币</option>
+                <option value="USD">USD 美元</option>
+                <option value="USDT">USDT 泰达币</option>
+              </select>
+            </div>
+          </label>
+          <label class="settings-field" id="field-account-margin-mode">
+            <span class="sf-label">保证金模式</span>
+            <div class="cf-input">
+              <select id="new-account-margin-mode">
+                <option value="isolated">逐仓（默认）</option>
+                <option value="cross">全仓</option>
+              </select>
+            </div>
+          </label>
+        </div>
+        <p class="settings-note" id="settings-basic-note" hidden></p>
+      </div>
+
+      <div class="settings-section">
+        <div class="settings-head">
+          <h3 class="settings-title">交易参数</h3>
+          <button type="button" class="link-btn" id="btn-settings-reset-all">恢复推荐值</button>
+        </div>
+        <p class="settings-note">参数仅影响本账户的杠杆上限、预估费用与强平计算；未修改的字段沿用系统默认。风险参数在持仓或挂单期间锁定。</p>
+        <div class="settings-lock" id="settings-lock-note" hidden></div>
+        <div class="settings-presets" id="settings-presets" aria-label="参数预设"></div>
+
+        <div class="settings-multiplier">
+          <div class="settings-mult-head">
+            <span class="settings-mult-label">杠杆上限倍率</span>
+            <b class="settings-mult-value" id="settings-mult-value">×1</b>
+            <span class="settings-mult-range" id="settings-mult-range-label">0.1× – 2×</span>
+          </div>
+          <input type="range" id="settings-mult-range" min="0.1" max="2" step="0.05" value="1" aria-label="杠杆上限倍率">
+          <div class="settings-quick" id="settings-mult-quick"></div>
+          <div class="settings-preview" id="settings-mult-preview"></div>
+          <p class="settings-note" id="settings-mult-note"></p>
+        </div>
+      </div>
+
+      <div id="account-settings-fields"></div>
       <div class="form-error" id="account-modal-error" hidden></div>
     </div>
     <div class="modal-foot">
@@ -526,6 +580,13 @@
         <li>在下方标签页查看持仓、当前委托、历史委托、成交记录、账户统计和净值曲线。</li>
         <li>新手建议先用 <b>1x 或 2x</b> 练手：A股试 100 股，或加密试 0.001 个 BTC；风险率超过 80% 要警惕强平。</li>
       </ol>
+      <h3 class="help-section-title">账户参数（右上角「账户设置」）</h3>
+      <ul class="help-notes">
+        <li><b>杠杆上限倍率</b>：按市场基准杠杆换算账户可用上限；0.1× 保守、1× 推荐（加密 100x / 外汇 200x / 港美 10x）、2× 激进（加密 125x / 外汇 400x / 港美 20x，按系统上限截断），A股恒 1x。</li>
+        <li><b>费率与滑点</b>：手续费、最低佣金、印花税、SEC 费等按账户生效，滑点 bps 影响市价成交估算；只影响之后的成交，可随时修改。</li>
+        <li><b>保证金参数</b>：维持保证金率越低越晚强平但风险更高；借币年化利率逐小时计息；强平费率在强制平仓时收取。有持仓或挂单时这些风险参数会锁定。</li>
+        <li>推荐保持默认值；提高倍率或降低 mmr 会放大风险，请自行控制仓位。</li>
+      </ul>
       <h3 class="help-section-title">术语速查</h3>
       <dl class="glossary">
         <dt>市价</dt><dd>立刻按当前市场价格成交，快但不保证价格。</dd>

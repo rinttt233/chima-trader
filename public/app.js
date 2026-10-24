@@ -56,8 +56,31 @@
     interestAnnual: { cn: 0, hk: 0.06, us: 0.06, fx: 0.03, crypto: 0.08 },
     liquidationFeeRate: { cn: 0, hk: 0.002, us: 0.002, fx: 0, crypto: 0.005 }
   };
-  var MAX_LEVERAGE_FALLBACK = { cn: 1, hk: 4, us: 4, fx: 100, crypto: 20 };
+  var MAX_LEVERAGE_FALLBACK = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125 };
   var ALLOW_SHORT_FALLBACK = { cn: false, hk: true, us: true, fx: true, crypto: true };
+  var BASE_LEVERAGE_FALLBACK = { cn: 1, hk: 10, us: 10, fx: 200, crypto: 100 };
+  var LEVERAGE_CEILING_FALLBACK = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125 };
+  var SETTINGS_RANGES_FALLBACK = {
+    initialCapital: [1000, 1000000000],
+    leverageMultiplier: [0.1, 2],
+    fees: {
+      commissionRate: [0, 0.005], commissionMin: [0, 500],
+      stampDutyRate: [0, 0.005], transferFeeRate: [0, 0.001],
+      exchangeFeeRate: [0, 0.001], settlementFeeRate: [0, 0.001],
+      perShare: [0, 0.1], secFeeRate: [0, 0.001], spreadBps: [0, 100]
+    },
+    slippageBps: [0, 200],
+    margin: {
+      mmr: { hk: [0.005, 0.5], us: [0.005, 0.5], fx: [0.0005, 0.1], crypto: [0.0005, 0.1] },
+      interestAnnual: [0, 0.5], liquidationFeeRate: [0, 0.05]
+    },
+    fxConvertSpread: [0, 0.02]
+  };
+  var SETTINGS_PRESETS_FALLBACK = {
+    conservative: { leverageMultiplier: 0.1, margin: { mmr: { cn: 1, hk: 0.1, us: 0.1, fx: 0.005, crypto: 0.01 } } },
+    recommended: { leverageMultiplier: 1, margin: { mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 } } },
+    aggressive: { leverageMultiplier: 2, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.002, crypto: 0.004 } } }
+  };
   var ONBOARDING_STEPS = [
     {
       target: '.watchlist-panel',
@@ -93,6 +116,11 @@
     prefs: null,
     markets: {},
     marketList: [],
+    settingsMeta: null,
+    settingsMode: 'create',
+    settingsLocked: false,
+    settingsFormDirty: false,
+    settingsPreset: null,
     watchlist: [],
     quotes: {},
     quoteErrors: [],
@@ -307,7 +335,87 @@
 
   // ------------------------------------------------------- leverage helpers
 
+  function cloneDeep(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  function settingsMeta() {
+    return state.settingsMeta || fallbackSettingsMeta();
+  }
+
+  function fallbackSettingsMeta() {
+    var fees = cloneDeep(FEE_CONFIG);
+    if (!fees.fx.commissionRate) fees.fx.commissionRate = 0;
+    var defaults = {
+      leverageMultiplier: 1,
+      fees: fees,
+      slippageBps: cloneDeep(SLIPPAGE_BPS),
+      margin: {
+        mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 },
+        interestAnnual: cloneDeep(MARGIN_CONFIG.interestAnnual),
+        liquidationFeeRate: cloneDeep(MARGIN_CONFIG.liquidationFeeRate)
+      },
+      autoConvert: true,
+      fxConvertSpread: 0.003
+    };
+    return {
+      markets: ['cn', 'hk', 'us', 'fx', 'crypto'].map(function (id) {
+        return {
+          id: id, name: MARKET_LABEL[id], currency: { cn: 'CNY', hk: 'HKD', us: 'USD', fx: 'USD', crypto: 'USDT' }[id],
+          baseLeverage: BASE_LEVERAGE_FALLBACK[id], maxLeverageCeiling: LEVERAGE_CEILING_FALLBACK[id],
+          shortable: ALLOW_SHORT_FALLBACK[id]
+        };
+      }),
+      ranges: cloneDeep(SETTINGS_RANGES_FALLBACK),
+      presets: cloneDeep(SETTINGS_PRESETS_FALLBACK),
+      multiplier: { range: [0.1, 2], default: 1, quick: [0.1, 0.25, 0.5, 1, 2] },
+      defaults: { settings: defaults, initialCapital: 1000000, baseCurrency: 'CNY' }
+    };
+  }
+
+  function settingsMarketMeta(market) {
+    var list = settingsMeta().markets || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === market) return list[i];
+    }
+    return null;
+  }
+
+  function settingsMultiplier() {
+    var meta = settingsMeta();
+    var fallback = meta.multiplier && meta.multiplier.default != null ? meta.multiplier.default : 1;
+    if (state.view && state.view.settings && state.view.settings.leverageMultiplier != null) {
+      return Number(state.view.settings.leverageMultiplier);
+    }
+    return fallback;
+  }
+
+  function multiplierLeverage(market, multiplier) {
+    var info = settingsMarketMeta(market);
+    var base = info && info.baseLeverage != null ? Number(info.baseLeverage) : (BASE_LEVERAGE_FALLBACK[market] || 1);
+    var ceiling = info && info.maxLeverageCeiling != null ? Number(info.maxLeverageCeiling) : (LEVERAGE_CEILING_FALLBACK[market] || 1);
+    var mult = Number(multiplier);
+    if (!isFinite(mult)) mult = 1;
+    if (market === 'cn') return 1;
+    return Math.min(ceiling, Math.max(1, Math.round(base * mult)));
+  }
+
+  function accountEffective() {
+    return state.view && state.view.effective ? state.view.effective : null;
+  }
+
   function maxLeverageFor(market) {
+    var eff = accountEffective();
+    if (eff && eff.leverage && eff.leverage[market] != null) {
+      return Math.max(1, Math.floor(Number(eff.leverage[market]) || 1));
+    }
+    if (state.view && state.view.settings) {
+      return multiplierLeverage(market, settingsMultiplier());
+    }
+    if (!state.view) {
+      var defMult = settingsMeta().multiplier && settingsMeta().multiplier.default != null ? settingsMeta().multiplier.default : 1;
+      return multiplierLeverage(market, defMult);
+    }
     var meta = state.markets[market];
     var value = meta && (meta.maxLeverage != null ? meta.maxLeverage
       : (meta.leverage && typeof meta.leverage === 'object' ? meta.leverage.max : null));
@@ -324,6 +432,10 @@
   }
 
   function mmrFor(market) {
+    var eff = accountEffective();
+    if (eff && eff.margin && eff.margin.mmr && eff.margin.mmr[market] != null) {
+      return Number(eff.margin.mmr[market]);
+    }
     var meta = state.markets[market];
     var value = meta && meta.mmr != null ? Number(meta.mmr) : null;
     if (!isFinite(value) || value == null || value < 0) {
@@ -331,6 +443,62 @@
     }
     if (value > 1) value = value / 100;
     return value;
+  }
+
+  function feeConfigFor(market) {
+    var base = FEE_CONFIG[market] || {};
+    var eff = accountEffective();
+    var configured = eff && eff.fees ? eff.fees[market] : null;
+    if (!configured) return base;
+    var merged = {};
+    Object.keys(base).forEach(function (key) { merged[key] = base[key]; });
+    Object.keys(configured).forEach(function (key) {
+      if (configured[key] != null && isFinite(Number(configured[key]))) merged[key] = Number(configured[key]);
+    });
+    return merged;
+  }
+
+  function slippageBpsFor(market) {
+    var eff = accountEffective();
+    if (eff && eff.slippageBps && eff.slippageBps[market] != null && isFinite(eff.slippageBps[market])) {
+      return Number(eff.slippageBps[market]);
+    }
+    return SLIPPAGE_BPS[market] || 0;
+  }
+
+  function interestAnnualFor(market) {
+    var eff = accountEffective();
+    if (eff && eff.margin && eff.margin.interestAnnual && eff.margin.interestAnnual[market] != null) {
+      return Number(eff.margin.interestAnnual[market]);
+    }
+    return MARGIN_CONFIG.interestAnnual[market] || 0;
+  }
+
+  function formatMultiplier(value) {
+    var num = Number(value);
+    return isFinite(num) ? fmtNumber(num, 2, 0) : '1';
+  }
+
+  function leverageCapsText(multiplier) {
+    var mult = multiplier == null ? settingsMultiplier() : multiplier;
+    var crypto = multiplierLeverage('crypto', mult);
+    var fx = multiplierLeverage('fx', mult);
+    var hk = multiplierLeverage('hk', mult);
+    var us = multiplierLeverage('us', mult);
+    return '加密 ' + crypto + 'x · 外汇 ' + fx + 'x · ' +
+      (hk === us ? '港美 ' + hk + 'x' : '港股 ' + hk + 'x · 美股 ' + us + 'x');
+  }
+
+  function accountLeverageCapsText() {
+    var eff = accountEffective();
+    if (eff && eff.leverage) {
+      var crypto = eff.leverage.crypto != null ? eff.leverage.crypto : multiplierLeverage('crypto', settingsMultiplier());
+      var fx = eff.leverage.fx != null ? eff.leverage.fx : multiplierLeverage('fx', settingsMultiplier());
+      var hk = eff.leverage.hk != null ? eff.leverage.hk : multiplierLeverage('hk', settingsMultiplier());
+      var us = eff.leverage.us != null ? eff.leverage.us : multiplierLeverage('us', settingsMultiplier());
+      return '加密 ' + crypto + 'x · 外汇 ' + fx + 'x · ' + (hk === us ? '港美 ' + hk + 'x' : '港股 ' + hk + 'x · 美股 ' + us + 'x');
+    }
+    return leverageCapsText(settingsMultiplier());
   }
 
   function clampLeverage(market, value) {
@@ -1108,21 +1276,24 @@
   function fmtMoney(value, currency, digits) {
     if (value == null || !isFinite(value)) return '--';
     var d = digits == null ? 2 : digits;
-    var sign = value < 0 ? '-' : '';
-    return sign + (CURRENCY_SYMBOL[currency] || '') + fmtNumber(Math.abs(value), d, d);
+    var abs = roundTo(Math.abs(value), d);
+    var sign = abs < 1e-9 ? '' : (value < 0 ? '-' : '');
+    return sign + (CURRENCY_SYMBOL[currency] || '') + fmtNumber(abs, d, d);
   }
 
   function fmtSignedMoney(value, currency, digits, withPlus) {
     if (value == null || !isFinite(value)) return '--';
     var d = digits == null ? 2 : digits;
-    var sign = value > 0 ? (withPlus === false ? '' : '+') : value < 0 ? '-' : '';
-    return sign + (CURRENCY_SYMBOL[currency] || '') + fmtNumber(Math.abs(value), d, d);
+    var abs = roundTo(Math.abs(value), d);
+    var sign = abs < 1e-9 ? '' : (value > 0 ? (withPlus === false ? '' : '+') : '-');
+    return sign + (CURRENCY_SYMBOL[currency] || '') + fmtNumber(abs, d, d);
   }
 
   function fmtPct(value, withPlus) {
     if (value == null || !isFinite(value)) return '--';
-    var sign = value > 0 ? (withPlus === false ? '' : '+') : value < 0 ? '-' : '';
-    return sign + fmtNumber(Math.abs(value), 2, 2) + '%';
+    var abs = roundTo(Math.abs(Number(value)), 2);
+    var sign = abs < 0.005 ? '' : (value > 0 ? (withPlus === false ? '' : '+') : '-');
+    return sign + fmtNumber(abs, 2, 2) + '%';
   }
 
   function fmtCompact(value) {
@@ -1196,8 +1367,36 @@
   }
 
   function pnlClass(value) {
-    if (value == null || !isFinite(value) || value === 0) return 'flat';
-    return value > 0 ? 'up' : 'down';
+    var rounded = Math.round(Number(value) * 100) / 100;
+    if (value == null || !isFinite(rounded) || rounded === 0) return 'flat';
+    return rounded > 0 ? 'up' : 'down';
+  }
+
+  // Shared P&L math so the full render and the live (SSE/poll) patch always
+  // agree, including for short positions. Price priority: live quote > snapshot.
+  function positionMetrics(pos, quote) {
+    var q = quote || quoteOf(pos && pos.symbol);
+    var last = q && q.price != null && isFinite(q.price)
+      ? Number(q.price)
+      : (Number(pos && pos.lastPrice) || 0);
+    var avg = Number(pos && pos.avgCost) || 0;
+    var qty = Number(pos && pos.qty) || 0;
+    var side = positionSide(pos);
+    var prevClose = q && q.prevClose != null && isFinite(q.prevClose) ? Number(q.prevClose) : last;
+    var unrealized = side === 'short' ? (avg - last) * qty : (last - avg) * qty;
+    var unrealizedPct = avg ? (side === 'short' ? (avg - last) / avg : (last / avg - 1)) * 100 : 0;
+    var today = (side === 'short' ? prevClose - last : last - prevClose) * qty;
+    return {
+      last: last,
+      avg: avg,
+      qty: qty,
+      side: side,
+      prevClose: prevClose,
+      marketValue: qty * last,
+      unrealized: unrealized,
+      unrealizedPct: unrealizedPct,
+      today: today
+    };
   }
 
   function roundTo(value, digits) {
@@ -1209,7 +1408,7 @@
   function estimateFeeBreakdown(market, side, qty, price, options) {
     var opts = options || {};
     var notional = (qty || 0) * (price || 0);
-    var cfg = FEE_CONFIG[market];
+    var cfg = feeConfigFor(market);
     var lines = [];
     var total = 0;
     if (!cfg || !notional) return { total: 0, lines: lines };
@@ -1220,18 +1419,21 @@
         total += rounded;
       }
     };
+    var sideApplies = function (rule) {
+      return !rule || rule === 'both' || rule === side;
+    };
     if (market === 'cn') {
       push('佣金', Math.max(notional * cfg.commissionRate, cfg.commissionMin));
-      if (side === 'sell') push('印花税', notional * cfg.stampDutyRate);
+      if (sideApplies(cfg.stampDutySide)) push('印花税', notional * cfg.stampDutyRate);
       push('过户费', notional * cfg.transferFeeRate);
     } else if (market === 'hk') {
       push('佣金', Math.max(notional * cfg.commissionRate, cfg.commissionMin));
-      push('印花税', notional * cfg.stampDutyRate);
+      if (sideApplies(cfg.stampDutySide)) push('印花税', notional * cfg.stampDutyRate);
       push('交易费', notional * cfg.exchangeFeeRate);
       push('结算费', notional * cfg.settlementFeeRate);
     } else if (market === 'us') {
       push('佣金', Math.max(qty * cfg.perShare, cfg.commissionMin));
-      if (side === 'sell') push('SEC 费', notional * cfg.secFeeRate);
+      if (sideApplies(cfg.secFeeSide)) push('SEC 费', notional * cfg.secFeeRate);
     } else if (market === 'crypto') {
       push('佣金', notional * cfg.commissionRate);
     } else if (market === 'fx') {
@@ -1280,11 +1482,19 @@
     POSITION_NOT_FOUND: '当前标的没有持仓，无法设置保护',
     ORDER_NOT_AMENDABLE: '该委托当前不可改价（仅未成交限价单可改）',
     ORDER_NOT_FOUND: '委托不存在或已成交/撤销',
+    SETTINGS_LOCKED: '有持仓或挂单时不能修改杠杆倍率 / 维持保证金率',
+    SETTINGS_INVALID: '账户参数不合法，请检查数值范围',
     ACCOUNT_NOT_FOUND: '账户不存在'
   };
 
-  function orderErrorMessage(err) {
+  function orderErrorMessage(err, market) {
     if (!err) return '下单失败，请稍后重试';
+    if (err.code === 'LEVERAGE_NOT_ALLOWED' && market && market !== 'cn') {
+      return '超过当前账户杠杆上限 ' + maxLeverageFor(market) + 'x，可在账户设置里调高倍率';
+    }
+    if (err.code === 'SETTINGS_LOCKED') {
+      return '有持仓或挂单时不能修改杠杆倍率 / 维持保证金率，请先平仓并撤单';
+    }
     var hint = err.code ? ORDER_ERROR_HINTS[err.code] : null;
     var message = errorText(err);
     if (hint) return hint + (message && message !== hint ? '（' + message + '）' : '');
@@ -1322,11 +1532,15 @@
   }
 
   function autoConvertEnabled() {
+    var eff = accountEffective();
+    if (eff && typeof eff.autoConvert === 'boolean') return eff.autoConvert;
     return !!(state.view && state.view.autoConvert);
   }
 
   function fxConvertSpread() {
-    var spread = state.view && state.view.fxConvertSpread;
+    var eff = accountEffective();
+    var spread = eff && eff.fxConvertSpread != null ? eff.fxConvertSpread
+      : (state.view && state.view.fxConvertSpread);
     return isFinite(spread) ? Number(spread) : 0.003;
   }
 
@@ -1394,11 +1608,19 @@
       var results = await Promise.all([
         settle(api('/api/markets')),
         settle(api('/api/watchlist')),
-        settle(api('/api/health'))
+        settle(api('/api/health')),
+        settle(api('/api/settings/meta'))
       ]);
       var marketsRes = results[0];
       var watchRes = results[1];
       var healthRes = results[2];
+      var settingsRes = results[3];
+
+      if (settingsRes && settingsRes.ok && settingsRes.value && Array.isArray(settingsRes.value.markets)) {
+        state.settingsMeta = settingsRes.value;
+      } else {
+        state.settingsMeta = fallbackSettingsMeta();
+      }
 
       if (marketsRes.ok) {
         state.marketList = (marketsRes.value && marketsRes.value.markets) || [];
@@ -1830,55 +2052,546 @@
     if (state.accountId) select.value = state.accountId;
   }
 
+  // ------------------------------------------------------- account settings
+
+  function mergeDeep(base, patch) {
+    var out = cloneDeep(base || {});
+    if (!patch || typeof patch !== 'object') return out;
+    Object.keys(patch).forEach(function (key) {
+      var value = patch[key];
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        out[key] = mergeDeep(out[key] || {}, value);
+      } else {
+        out[key] = cloneDeep(value);
+      }
+    });
+    return out;
+  }
+
+  function getPath(obj, path) {
+    var parts = String(path).split('.');
+    var cur = obj;
+    for (var i = 0; i < parts.length; i++) {
+      if (cur == null) return undefined;
+      cur = cur[parts[i]];
+    }
+    return cur;
+  }
+
+  function setPath(obj, path, value) {
+    var parts = String(path).split('.');
+    var cur = obj;
+    for (var i = 0; i < parts.length - 1; i++) {
+      if (!cur[parts[i]] || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+      cur = cur[parts[i]];
+    }
+    cur[parts[parts.length - 1]] = value;
+    return obj;
+  }
+
+  function defaultSettingsDeep() {
+    var fallback = fallbackSettingsMeta().defaults.settings;
+    var defaults = (settingsMeta().defaults && settingsMeta().defaults.settings) || {};
+    return mergeDeep(fallback, defaults);
+  }
+
+  function formatRatePercent(value) {
+    var abs = Math.abs(Number(value));
+    if (!isFinite(abs)) return '0%';
+    var digits = abs >= 1 ? 2 : abs >= 0.1 ? 3 : 4;
+    var text = Number(value).toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
+    return (text === '-0' ? '0' : text) + '%';
+  }
+
+  function formatSettingsValue(field, value) {
+    if (value == null || !isFinite(Number(value))) return '--';
+    var num = Number(value);
+    if (field.kind === 'pct') return formatRatePercent(num * 100);
+    if (field.kind === 'bps') return fmtNumber(num, 2, 0) + ' bp';
+    if (field.unit === '¥') return '¥' + fmtNumber(num, 4, 2);
+    if (field.unit === 'HK$') return 'HK$' + fmtNumber(num, 4, 2);
+    if (field.unit === '$') return '$' + fmtNumber(num, 4, 2);
+    if (field.unit === '$/股') return '$' + fmtNumber(num, 4, 2) + '/股';
+    return fmtNumber(num, 4, 2) + (field.unit ? ' ' + field.unit : '');
+  }
+
+  function settingsFieldRange(field) {
+    var ranges = settingsMeta().ranges || {};
+    if (field.rangeKey && field.rangeKey.indexOf('fees.') === 0) {
+      var key = field.rangeKey.slice(5);
+      return (ranges.fees && ranges.fees[key]) || [0, 1];
+    }
+    if (field.rangeKey === 'slippageBps') return ranges.slippageBps || [0, 200];
+    if (field.rangeKey === 'margin.mmr') return (ranges.margin && ranges.margin.mmr && ranges.margin.mmr[field.market]) || [0.0005, 0.1];
+    if (field.rangeKey === 'margin.interestAnnual') return (ranges.margin && ranges.margin.interestAnnual) || [0, 0.5];
+    if (field.rangeKey === 'margin.liquidationFeeRate') return (ranges.margin && ranges.margin.liquidationFeeRate) || [0, 0.05];
+    if (field.rangeKey === 'fxConvertSpread') return ranges.fxConvertSpread || [0, 0.02];
+    return null;
+  }
+
+  function settingsFieldDefinitions() {
+    function field(path, label, kind, unit, rangeKey, market, risk) {
+      return { path: path, label: label, kind: kind, unit: unit || '', rangeKey: rangeKey || '', market: market || '', risk: !!risk };
+    }
+    return [
+      {
+        title: '手续费',
+        groups: [
+          { sub: 'A股', fields: [
+            field('fees.cn.commissionRate', '佣金率', 'pct', '%', 'fees.commissionRate'),
+            field('fees.cn.commissionMin', '最低佣金', 'num', '¥', 'fees.commissionMin'),
+            field('fees.cn.stampDutyRate', '印花税率', 'pct', '%', 'fees.stampDutyRate'),
+            field('fees.cn.transferFeeRate', '过户费率', 'pct', '%', 'fees.transferFeeRate')
+          ] },
+          { sub: '港股', fields: [
+            field('fees.hk.commissionRate', '佣金率', 'pct', '%', 'fees.commissionRate'),
+            field('fees.hk.commissionMin', '最低佣金', 'num', 'HK$', 'fees.commissionMin'),
+            field('fees.hk.stampDutyRate', '印花税率', 'pct', '%', 'fees.stampDutyRate'),
+            field('fees.hk.exchangeFeeRate', '交易费率', 'pct', '%', 'fees.exchangeFeeRate'),
+            field('fees.hk.settlementFeeRate', '结算费率', 'pct', '%', 'fees.settlementFeeRate')
+          ] },
+          { sub: '美股', fields: [
+            field('fees.us.perShare', '每股佣金', 'num', '$/股', 'fees.perShare'),
+            field('fees.us.commissionMin', '最低佣金', 'num', '$', 'fees.commissionMin'),
+            field('fees.us.secFeeRate', 'SEC 费率', 'pct', '%', 'fees.secFeeRate')
+          ] },
+          { sub: '外汇 / 加密', fields: [
+            field('fees.fx.spreadBps', '外汇点差', 'bps', 'bp', 'fees.spreadBps'),
+            field('fees.crypto.commissionRate', '加密佣金率', 'pct', '%', 'fees.commissionRate')
+          ] }
+        ]
+      },
+      {
+        title: '滑点与换汇',
+        groups: [
+          { fields: [
+            field('slippageBps.cn', 'A股滑点', 'bps', 'bp', 'slippageBps'),
+            field('slippageBps.hk', '港股滑点', 'bps', 'bp', 'slippageBps'),
+            field('slippageBps.us', '美股滑点', 'bps', 'bp', 'slippageBps'),
+            field('slippageBps.fx', '外汇滑点', 'bps', 'bp', 'slippageBps'),
+            field('slippageBps.crypto', '加密滑点', 'bps', 'bp', 'slippageBps'),
+            field('fxConvertSpread', '自动换汇成本', 'pct', '%', 'fxConvertSpread')
+          ] }
+        ]
+      },
+      {
+        title: '保证金与利息',
+        note: 'A股固定：维持保证金率 100%、借币利率 0、强平费 0（无杠杆）。',
+        groups: [
+          { sub: '维持保证金率', fields: [
+            field('margin.mmr.hk', '港股 mmr', 'pct', '%', 'margin.mmr', 'hk', true),
+            field('margin.mmr.us', '美股 mmr', 'pct', '%', 'margin.mmr', 'us', true),
+            field('margin.mmr.fx', '外汇 mmr', 'pct', '%', 'margin.mmr', 'fx', true),
+            field('margin.mmr.crypto', '加密 mmr', 'pct', '%', 'margin.mmr', 'crypto', true)
+          ] },
+          { sub: '借币年化利率', fields: [
+            field('margin.interestAnnual.hk', '港股利率', 'pct', '%', 'margin.interestAnnual', 'hk', true),
+            field('margin.interestAnnual.us', '美股利率', 'pct', '%', 'margin.interestAnnual', 'us', true),
+            field('margin.interestAnnual.fx', '外汇利率', 'pct', '%', 'margin.interestAnnual', 'fx', true),
+            field('margin.interestAnnual.crypto', '加密利率', 'pct', '%', 'margin.interestAnnual', 'crypto', true)
+          ] },
+          { sub: '强平费率', fields: [
+            field('margin.liquidationFeeRate.hk', '港股强平费', 'pct', '%', 'margin.liquidationFeeRate', 'hk', true),
+            field('margin.liquidationFeeRate.us', '美股强平费', 'pct', '%', 'margin.liquidationFeeRate', 'us', true),
+            field('margin.liquidationFeeRate.fx', '外汇强平费', 'pct', '%', 'margin.liquidationFeeRate', 'fx', true),
+            field('margin.liquidationFeeRate.crypto', '加密强平费', 'pct', '%', 'margin.liquidationFeeRate', 'crypto', true)
+          ] }
+        ]
+      }
+    ];
+  }
+
+  function settingsFieldsFlat() {
+    var out = [];
+    settingsFieldDefinitions().forEach(function (section) {
+      section.groups.forEach(function (group) {
+        group.fields.forEach(function (field) { out.push(field); });
+      });
+    });
+    return out;
+  }
+
+  function settingsFieldByPath(path) {
+    var list = settingsFieldsFlat();
+    for (var i = 0; i < list.length; i++) if (list[i].path === path) return list[i];
+    return null;
+  }
+
+  function settingDisplayInputValue(field, value) {
+    if (field.kind === 'bool') return !!value;
+    var num = Number(value);
+    if (!isFinite(num)) num = 0;
+    if (field.kind === 'pct') num = roundTo(num * 100, 6);
+    return String(num);
+  }
+
+  function settingInputToValue(field, raw) {
+    var num = Number(raw);
+    if (!isFinite(num)) return NaN;
+    if (field.kind === 'pct') return num / 100;
+    return num;
+  }
+
+  function renderSettingsFields(settings) {
+    var host = $('#account-settings-fields');
+    if (!host) return;
+    var defaults = defaultSettingsDeep();
+    var locked = state.settingsLocked;
+    var html = settingsFieldDefinitions().map(function (section) {
+      var body = section.groups.map(function (group) {
+        var rows = group.fields.map(function (field) {
+          var value = getPath(settings, field.path);
+          if (value == null) value = getPath(defaults, field.path);
+          var range = settingsFieldRange(field);
+          var displayMin = field.kind === 'pct' && range ? roundTo(range[0] * 100, 6) : range ? range[0] : null;
+          var displayMax = field.kind === 'pct' && range ? roundTo(range[1] * 100, 6) : range ? range[1] : null;
+          var recValue = getPath(defaults, field.path);
+          var disabled = locked && field.risk;
+          var recText = field.kind === 'bool' ? '' : '推荐 ' + formatSettingsValue(field, recValue);
+          return '<label class="settings-field' + (disabled ? ' is-locked' : '') + '" data-path="' + escapeHtml(field.path) + '">' +
+            '<span class="sf-label">' + escapeHtml(field.label) +
+            (recText ? '<em class="sf-rec">' + escapeHtml(recText) + '</em>' : '') + '</span>' +
+            '<div class="cf-input">' +
+            '<input type="number" data-setting-path="' + escapeHtml(field.path) + '" data-kind="' + field.kind + '"' +
+            ' value="' + escapeHtml(settingDisplayInputValue(field, value)) + '"' +
+            (displayMin != null ? ' min="' + displayMin + '"' : '') +
+            (displayMax != null ? ' max="' + displayMax + '"' : '') +
+            ' step="any"' + (disabled ? ' disabled' : '') + '>' +
+            (field.unit ? '<span class="sf-unit">' + escapeHtml(field.unit) + '</span>' : '') +
+            '<button type="button" class="field-reset" data-setting-reset="' + escapeHtml(field.path) + '" title="恢复推荐值"' + (disabled ? ' disabled' : '') + '>↺</button>' +
+            '</div></label>';
+        }).join('');
+        return (group.sub ? '<div class="settings-subhead">' + escapeHtml(group.sub) + '</div>' : '') +
+          '<div class="settings-grid">' + rows + '</div>';
+      }).join('');
+      return '<div class="settings-section"><div class="settings-head"><h3 class="settings-title">' +
+        escapeHtml(section.title) + '</h3></div>' +
+        (section.note ? '<p class="settings-note">' + escapeHtml(section.note) + '</p>' : '') + body + '</div>';
+    }).join('');
+
+    var auto = getPath(settings, 'autoConvert');
+    var autoChecked = auto == null ? true : !!auto;
+    html += '<div class="settings-section"><div class="settings-head"><h3 class="settings-title">自动换汇</h3></div>' +
+      '<label class="settings-check"><input type="checkbox" data-setting-path="autoConvert" data-kind="bool"' +
+      (autoChecked ? ' checked' : '') + (locked ? '' : '') + '>' +
+      '<span>外币现金不足时自动从基础币种换汇（关闭后不足会直接失败）</span></label></div>';
+    host.innerHTML = html;
+  }
+
+  function readSettingsForm(base) {
+    var out = cloneDeep(base || defaultSettingsDeep());
+    $$('#account-settings-fields [data-setting-path]').forEach(function (input) {
+      var path = input.getAttribute('data-setting-path');
+      var kind = input.getAttribute('data-kind');
+      if (kind === 'bool') {
+        setPath(out, path, !!input.checked);
+        return;
+      }
+      var field = settingsFieldByPath(path);
+      if (!field) return;
+      setPath(out, path, settingInputToValue(field, input.value));
+    });
+    return out;
+  }
+
+  function settingsValidate(settings) {
+    var err = null;
+    settingsFieldsFlat().forEach(function (field) {
+      if (err || field.kind === 'bool') return;
+      var value = Number(getPath(settings, field.path));
+      if (!isFinite(value)) { err = field.label + ' 不是有效数字'; return; }
+      var range = settingsFieldRange(field);
+      if (range && (value < range[0] - 1e-12 || value > range[1] + 1e-12)) {
+        err = field.label + ' 超出范围（' + formatSettingsValue(field, range[0]) + ' – ' + formatSettingsValue(field, range[1]) + '）';
+      }
+    });
+    if (err) return err;
+    var multRange = (settingsMeta().multiplier && settingsMeta().multiplier.range) || [0.1, 2];
+    if (settings.leverageMultiplier < multRange[0] - 1e-9 || settings.leverageMultiplier > multRange[1] + 1e-9) {
+      return '杠杆上限倍率需在 ' + multRange[0] + '× – ' + multRange[1] + '× 之间';
+    }
+    var markets = ['hk', 'us', 'fx', 'crypto'];
+    for (var i = 0; i < markets.length; i++) {
+      var market = markets[i];
+      var mmr = Number(getPath(settings, 'margin.mmr.' + market));
+      var lev = multiplierLeverage(market, settings.leverageMultiplier);
+      if (isFinite(mmr) && mmr > 0.9 / lev + 1e-12) {
+        return (market === 'hk' ? '港股' : market === 'us' ? '美股' : market === 'fx' ? '外汇' : '加密') +
+          '维持保证金率过高：需 ≤ 0.9 / 杠杆上限 ' + lev + 'x，即 ≤ ' + formatRatePercent((0.9 / lev) * 100);
+      }
+    }
+    return null;
+  }
+
+  function updateSettingsMultiplierUI() {
+    var range = $('#settings-mult-range');
+    var mult = range ? Number(range.value) : 1;
+    if (!isFinite(mult)) mult = 1;
+    var multRange = (settingsMeta().multiplier && settingsMeta().multiplier.range) || [0.1, 2];
+    setText('#settings-mult-value', '×' + formatMultiplier(mult));
+    setText('#settings-mult-range-label', multRange[0] + '× – ' + multRange[1] + '×');
+    setText('#settings-mult-preview', leverageCapsText(mult));
+    var recommended = multiplierLeverage('crypto', 1) + 'x';
+    setText('#settings-mult-note',
+      '推荐 1×：' + leverageCapsText(1) + '；倍率越高，杠杆上限越高，也越容易接近强平线。' +
+      (multiplierLeverage('crypto', mult) === Number(recommended.replace('x', '')) ? '' : ' 风险自担。'));
+    var quick = $('#settings-mult-quick');
+    if (quick) {
+      var values = (settingsMeta().multiplier && settingsMeta().multiplier.quick) || [0.1, 0.25, 0.5, 1, 2];
+      quick.innerHTML = values.map(function (value) {
+        var label = Math.abs(Number(value) - 1) < 1e-9 ? '×1 <em>推荐</em>' : '×' + value;
+        return '<button type="button" data-mult="' + value + '"' + (Math.abs(Number(value) - mult) < 1e-9 ? ' class="active"' : '') + '>' + label + '</button>';
+      }).join('');
+    }
+    $$('#settings-presets [data-preset]').forEach(function (btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-preset') === state.settingsPreset);
+    });
+  }
+
+  function setMultiplierValue(value) {
+    var range = $('#settings-mult-range');
+    if (!range) return;
+    range.value = String(value);
+    state.settingsPreset = null;
+    updateSettingsMultiplierUI();
+  }
+
+  function updateSettingsLockUI() {
+    var note = $('#settings-lock-note');
+    if (note) {
+      note.hidden = !state.settingsLocked;
+      note.textContent = state.settingsLocked
+        ? '有持仓或未成交委托：杠杆倍率与保证金参数已锁定，需先平仓并撤单。手续费、滑点与换汇仍可修改。'
+        : '';
+    }
+    var range = $('#settings-mult-range');
+    if (range) range.disabled = !!state.settingsLocked;
+    $$('#settings-mult-quick button, #settings-presets button').forEach(function (btn) {
+      btn.disabled = !!state.settingsLocked;
+    });
+  }
+
+  function setSettingsForm(settings) {
+    state.settingsFormDirty = false;
+    var range = $('#settings-mult-range');
+    if (range) range.value = String(settings.leverageMultiplier != null ? settings.leverageMultiplier : 1);
+    updateSettingsMultiplierUI();
+    renderSettingsFields(settings);
+    updateSettingsLockUI();
+  }
+
+  function applySettingsPreset(name) {
+    if (state.settingsLocked) return;
+    var preset = settingsMeta().presets && settingsMeta().presets[name];
+    if (!preset) return;
+    state.settingsPreset = name;
+    state.settingsFormDirty = true;
+    var current = readSettingsForm(defaultSettingsDeep());
+    current.leverageMultiplier = preset.leverageMultiplier != null ? preset.leverageMultiplier : current.leverageMultiplier;
+    if (preset.margin && preset.margin.mmr) {
+      Object.keys(preset.margin.mmr).forEach(function (market) {
+        setPath(current, 'margin.mmr.' + market, preset.margin.mmr[market]);
+      });
+    }
+    setSettingsForm(current);
+    updateSettingsMultiplierUI();
+  }
+
+  function resetSettingsToDefaults() {
+    if (state.settingsLocked) {
+      // Fees / slippage / conversion are still editable even with positions.
+      var current = readSettingsForm(defaultSettingsDeep());
+      var defaults = defaultSettingsDeep();
+      ['fees', 'slippageBps', 'autoConvert', 'fxConvertSpread'].forEach(function (key) {
+        current[key] = cloneDeep(defaults[key]);
+      });
+      setSettingsForm(current);
+      state.settingsPreset = 'recommended';
+      updateSettingsMultiplierUI();
+      return;
+    }
+    setSettingsForm(defaultSettingsDeep());
+    state.settingsPreset = 'recommended';
+    updateSettingsMultiplierUI();
+  }
+
+  function renderSettingsPresets() {
+    var host = $('#settings-presets');
+    if (!host) return;
+    var presets = settingsMeta().presets || {};
+    var labels = { conservative: '保守', recommended: '推荐', aggressive: '激进' };
+    host.innerHTML = Object.keys(labels).map(function (key) {
+      if (!presets[key]) return '';
+      return '<button type="button" data-preset="' + key + '">' + labels[key] + '</button>';
+    }).join('') + '<span class="settings-preset-note" id="settings-preset-note">自定义</span>';
+    updateSettingsMultiplierUI();
+  }
+
+  function setBasicAccountFieldsEnabled(enabled) {
+    ['#new-account-name', '#new-account-capital', '#new-account-currency', '#new-account-margin-mode'].forEach(function (selector) {
+      var el = $(selector);
+      if (el) el.disabled = !enabled;
+    });
+    var note = $('#settings-basic-note');
+    if (note) {
+      note.hidden = enabled;
+      note.textContent = enabled ? '' : '账户名称 / 初始资金 / 基础币种 / 保证金模式创建后不可修改；保证金模式请用上方「切换模式」。';
+    }
+  }
+
+  function updateCapitalUnit() {
+    var select = $('#new-account-currency');
+    setText('#account-capital-unit', select ? select.value : 'CNY');
+  }
+
+  function openAccountSettings() {
+    if (!state.accountId || !state.view) {
+      showToast('请先创建账户', 'warn');
+      return;
+    }
+    var account = state.view.account || {};
+    state.settingsMode = 'edit';
+    state.accountModalRequired = false;
+    state.settingsLocked = !!((state.view.positions && state.view.positions.length) || (state.view.openOrders && state.view.openOrders.length));
+    var modal = $('#modal-account');
+    if (!modal) return;
+    modal.hidden = false;
+    setText('#modal-account-title', '账户设置');
+    setText('#account-modal-hint', '调整账户「' + (account.name || '') + '」的杠杆倍率、费率、滑点与保证金参数；仅影响之后的成交与风控计算。');
+    setText('#btn-create-account', '保存设置');
+    var nameInput = $('#new-account-name');
+    var capitalInput = $('#new-account-capital');
+    if (nameInput) nameInput.value = account.name || '';
+    if (capitalInput) capitalInput.value = String(account.initialCapital != null ? account.initialCapital : 1000000);
+    var currencySel = $('#new-account-currency');
+    if (currencySel) currencySel.value = account.baseCurrency || 'CNY';
+    updateCapitalUnit();
+    var modeSel = $('#new-account-margin-mode');
+    if (modeSel) modeSel.value = account.marginMode || 'isolated';
+    setBasicAccountFieldsEnabled(false);
+    var cancelBtn = $('#btn-cancel-account');
+    if (cancelBtn) cancelBtn.hidden = false;
+    var closeBtn = $('#modal-account [data-close-modal]');
+    if (closeBtn) closeBtn.hidden = false;
+    hideFormError('#account-modal-error');
+    var base = mergeDeep(defaultSettingsDeep(), state.view.settings || {});
+    renderSettingsPresets();
+    state.settingsPreset = null;
+    setSettingsForm(base);
+  }
+
   function openCreateAccount(required) {
     state.accountModalRequired = !!required;
+    state.settingsMode = 'create';
+    state.settingsLocked = false;
+    state.settingsPreset = 'recommended';
     var modal = $('#modal-account');
     if (!modal) return;
     modal.hidden = false;
     setText('#account-modal-hint', required
       ? '欢迎使用 千亦所 ChimaTrader。请先创建一个模拟账户，所有交易均使用虚拟资金。'
-      : '创建一个新的模拟账户，初始资金可自由设置（默认 100 万 CNY）。');
+      : '创建一个新的模拟账户，可自定义费率、滑点、保证金与杠杆上限倍率。');
     setText('#modal-account-title', required ? '创建模拟账户' : '新建模拟账户');
+    setText('#btn-create-account', '创建账户');
+    var metaDefaults = settingsMeta().defaults || {};
     var nameInput = $('#new-account-name');
     var capitalInput = $('#new-account-capital');
     if (nameInput) nameInput.value = '';
-    if (capitalInput) capitalInput.value = '1000000';
+    if (capitalInput) capitalInput.value = String(metaDefaults.initialCapital != null ? metaDefaults.initialCapital : 1000000);
+    var currencySel = $('#new-account-currency');
+    if (currencySel) currencySel.value = metaDefaults.baseCurrency || 'CNY';
+    updateCapitalUnit();
+    var modeSel = $('#new-account-margin-mode');
+    if (modeSel) modeSel.value = 'isolated';
+    setBasicAccountFieldsEnabled(true);
     hideFormError('#account-modal-error');
     var cancelBtn = $('#btn-cancel-account');
     if (cancelBtn) cancelBtn.hidden = !!required;
     var closeBtn = $('#modal-account [data-close-modal]');
     if (closeBtn) closeBtn.hidden = !!required;
+    renderSettingsPresets();
+    setSettingsForm(defaultSettingsDeep());
+    state.settingsPreset = 'recommended';
+    updateSettingsMultiplierUI();
     if (nameInput) setTimeout(function () { nameInput.focus(); }, 40);
   }
 
-  async function submitCreateAccount() {
+  async function submitAccountSettings() {
+    var createMode = state.settingsMode === 'create';
     var name = ($('#new-account-name').value || '').trim();
     var capital = Number($('#new-account-capital').value);
-    if (!(capital > 0)) {
-      showFormError('#account-modal-error', '初始资金必须大于 0');
+    var capitalRange = (settingsMeta().ranges && settingsMeta().ranges.initialCapital) || [1000, 1000000000];
+    if (createMode) {
+      if (!(capital >= capitalRange[0] && capital <= capitalRange[1])) {
+        showFormError('#account-modal-error', '初始资金需在 ' + fmtNumber(capitalRange[0], 0, 0) + ' – ' + fmtNumber(capitalRange[1], 0, 0) + ' 之间');
+        return;
+      }
+      if (!name) name = '模拟账户' + (state.accounts.length + 1);
+    }
+    var multiplierInput = $('#settings-mult-range');
+    var multiplier = multiplierInput ? Number(multiplierInput.value) : 1;
+    var base = createMode ? defaultSettingsDeep() : mergeDeep(defaultSettingsDeep(), state.view.settings || {});
+    var draft = readSettingsForm(base);
+    draft.leverageMultiplier = multiplier;
+    var validationError = settingsValidate(draft);
+    if (validationError) {
+      showFormError('#account-modal-error', validationError);
       return;
     }
-    if (!name) name = '模拟账户' + (state.accounts.length + 1);
+    hideFormError('#account-modal-error');
     var btn = $('#btn-create-account');
     btn.disabled = true;
+    var epoch = state.accountEpoch;
     try {
-      var res = await api('/api/accounts', { method: 'POST', body: { name: name, initialCapital: capital } });
-      state.accountModalRequired = false;
-      closeModal('modal-account');
-      showToast('账户「' + name + '」已创建，初始资金 ' + fmtMoney(capital, 'CNY'), 'success');
-      var newId = res && res.account ? res.account.id : null;
-      await refreshAccounts(newId);
-      state.auxLoadedAt = 0;
-      loadActiveTabData();
-      if (!state.prefs.onboardingSeen) {
-        setTimeout(function () {
-          if (!state.onboardingActive) openOnboarding();
-        }, 500);
+      if (createMode) {
+        var body = {
+          name: name,
+          initialCapital: capital,
+          baseCurrency: $('#new-account-currency') ? $('#new-account-currency').value : 'CNY',
+          marginMode: $('#new-account-margin-mode') ? $('#new-account-margin-mode').value : 'isolated',
+          settings: draft
+        };
+        var res = await api('/api/accounts', { method: 'POST', body: body });
+        state.accountModalRequired = false;
+        closeModal('modal-account');
+        showToast('账户「' + name + '」已创建，初始资金 ' + fmtMoney(capital, 'CNY'), 'success');
+        var newId = res && res.account ? res.account.id : null;
+        await refreshAccounts(newId);
+        state.auxLoadedAt = 0;
+        loadActiveTabData();
+        if (!state.prefs.onboardingSeen) {
+          setTimeout(function () {
+            if (!state.onboardingActive) openOnboarding();
+          }, 500);
+        }
+      } else {
+        var payload;
+        if (state.settingsLocked) {
+          payload = {
+            fees: draft.fees,
+            slippageBps: draft.slippageBps,
+            autoConvert: draft.autoConvert,
+            fxConvertSpread: draft.fxConvertSpread
+          };
+        } else {
+          payload = draft;
+        }
+        await api('/api/accounts/' + encodeURIComponent(state.accountId) + '/settings', {
+          method: 'PATCH', body: { settings: payload }
+        });
+        closeModal('modal-account');
+        showToast('账户参数已保存', 'success');
+        await refreshAccounts(state.accountId);
+        state.auxLoadedAt = 0;
+        loadActiveTabData();
       }
     } catch (err) {
-      showFormError('#account-modal-error', errorText(err));
+      var message = orderErrorMessage(err);
+      if (err && err.code === 'SETTINGS_LOCKED') message = '有持仓或挂单时不能修改杠杆倍率 / 保证金参数，请先平仓并撤单';
+      showFormError('#account-modal-error', message);
     } finally {
       btn.disabled = false;
+      if (epoch !== state.accountEpoch && !createMode) { /* refresh handled elsewhere */ }
     }
   }
 
@@ -2225,13 +2938,14 @@
     if (!quote) return null;
     var market = quote.market;
     if (market === 'fx') {
-      var half = (FEE_CONFIG.fx.spreadBps / 2) / 10000;
+      var fxSpread = feeConfigFor('fx').spreadBps;
+      var half = (Number(fxSpread) / 2) / 10000;
       return side === 'buy' ? quote.price * (1 + half) : quote.price * (1 - half);
     }
     var base = side === 'buy'
       ? (quote.ask && quote.ask[0] ? quote.ask[0].price : quote.price)
       : (quote.bid && quote.bid[0] ? quote.bid[0].price : quote.price);
-    var slip = (SLIPPAGE_BPS[market] || 0) / 10000;
+    var slip = slippageBpsFor(market) / 10000;
     return side === 'buy' ? base * (1 + slip) : base * (1 - slip);
   }
 
@@ -2325,7 +3039,12 @@
     var locked = market === 'cn' || !!pos;
     block.classList.toggle('is-disabled', locked);
     setText('#leverage-value', leverage + 'x');
-    setText('#leverage-max', market === 'cn' ? 'A股恒 1x' : '最大 ' + max + 'x');
+    if (market === 'cn') {
+      setText('#leverage-max', 'A股恒 1x');
+    } else {
+      var recommended = multiplierLeverage(market, (settingsMeta().presets && settingsMeta().presets.recommended && settingsMeta().presets.recommended.leverageMultiplier) || 1);
+      setText('#leverage-max', '账户上限 ' + max + 'x · 推荐 ' + recommended + 'x');
+    }
     var range = $('#leverage-range');
     if (range) {
       range.min = '1';
@@ -2357,7 +3076,7 @@
     } else if (state.orderAction === 'close') {
       text = '平仓沿用持仓杠杆，不产生新的保证金。';
     } else if (leverage > 1) {
-      text = '杠杆放大盈亏，借入部分按年化 ' + fmtNumber((MARGIN_CONFIG.interestAnnual[market] || 0) * 100, 1, 0) + '% 计息，注意强平风险。';
+      text = '杠杆放大盈亏，借入部分按年化 ' + fmtNumber(interestAnnualFor(market) * 100, 1, 0) + '% 计息，注意强平风险。';
       warn = true;
     } else {
       text = '1x = 现货，不借币、不计息。';
@@ -2537,7 +3256,7 @@
             liqPrice = (fill * qty + marginRequired) / (qty * (1 + mmr));
           }
           var debt = amount * (1 - 1 / leverage);
-          var annual = MARGIN_CONFIG.interestAnnual[market] || 0;
+          var annual = interestAnnualFor(market);
           var hourly = debt * annual / 8760;
           setText('#preview-margin', fmtMoney(marginRequired, currency));
           setText('#preview-margin-available', fmtMoney(marginAvailable, 'CNY'));
@@ -2659,7 +3378,7 @@
       : (pos ? (Number(pos.leverage) || 1) : leverForOrder());
     if (!isClose) {
       if (market === 'cn' && leverage > 1) return { ok: false, message: 'A股不支持杠杆（恒 1x）' };
-      if (leverage > maxLev + 1e-9) return { ok: false, message: '杠杆超出上限：该市场最大 ' + maxLev + 'x' };
+      if (leverage > maxLev + 1e-9) return { ok: false, message: '超过当前账户杠杆上限 ' + maxLev + 'x，可在账户设置里调高倍率' };
       if (pos) {
         var posSide = positionSide(pos);
         var wantSide = action === 'long' ? 'long' : 'short';
@@ -2949,7 +3668,7 @@
       loadTradableCandidates();
     } catch (err) {
       if (epoch !== state.accountEpoch) return;
-      var friendly = orderErrorMessage(err);
+      var friendly = orderErrorMessage(err, marketOf(state.selected));
       setOrderHint('error', '下单失败：' + friendly);
       showToast('下单失败：' + friendly, 'error');
     } finally {
@@ -3241,6 +3960,13 @@
       badge.textContent = mode === 'cross' ? '全仓' : '逐仓';
       badge.classList.toggle('is-cross', mode === 'cross');
     }
+    var multiplier = settingsMultiplier();
+    var multBadge = $('#account-multiplier-badge');
+    if (multBadge) {
+      multBadge.textContent = '倍率 ×' + formatMultiplier(multiplier);
+      multBadge.title = '账户杠杆上限倍率 ×' + multiplier + '\n' + accountLeverageCapsText();
+    }
+    setText('#account-leverage-caps', accountLeverageCapsText());
     var positions = view.positions || [];
     var rates = view.fxRates || {};
     var marginUsed = view.marginUsed != null ? Number(view.marginUsed) : positions.reduce(function (sum, pos) {
@@ -3436,21 +4162,16 @@
       var ref = state.positionRefs[pos.symbol];
       var quote = quoteOf(pos.symbol);
       if (!ref || !quote || quote.price == null) return;
-      var last = Number(quote.price);
-      var marketValue = pos.qty * last;
-      var unrealized = (last - pos.avgCost) * pos.qty;
-      var unrealizedPct = pos.avgCost ? (last / pos.avgCost - 1) * 100 : 0;
-      var todayBase = quote.prevClose != null ? quote.prevClose : last;
-      var today = (last - todayBase) * pos.qty;
-      ref.price.textContent = fmtPrice(last, pos.symbol);
+      var m = positionMetrics(pos, quote);
+      ref.price.textContent = fmtPrice(m.last, pos.symbol);
       ref.price.className = 'ta-r num';
-      ref.mv.textContent = fmtMoney(marketValue, pos.currency);
-      ref.pnl.textContent = fmtSignedMoney(unrealized, pos.currency);
-      ref.pnl.className = 'ta-r num ' + pnlClass(unrealized);
-      ref.pct.textContent = fmtPct(unrealizedPct);
-      ref.pct.className = 'ta-r num ' + pnlClass(unrealized);
-      ref.today.textContent = fmtSignedMoney(today, pos.currency);
-      ref.today.className = 'ta-r num ' + pnlClass(today);
+      ref.mv.textContent = fmtMoney(m.marketValue, pos.currency);
+      ref.pnl.textContent = fmtSignedMoney(m.unrealized, pos.currency);
+      ref.pnl.className = 'ta-r num ' + pnlClass(m.unrealized);
+      ref.pct.textContent = fmtPct(m.unrealizedPct);
+      ref.pct.className = 'ta-r num ' + pnlClass(m.unrealizedPct);
+      ref.today.textContent = fmtSignedMoney(m.today, pos.currency);
+      ref.today.className = 'ta-r num ' + pnlClass(m.today);
       if (dirs[pos.symbol]) flashValue(ref.price, dirs[pos.symbol]);
     });
   }
@@ -3676,14 +4397,11 @@
     tbody.innerHTML = positions.map(function (pos) {
       var qty = Number(pos.qty) || 0;
       var avail = Number(pos.availableQty != null ? pos.availableQty : qty) || 0;
-      var last = Number(pos.lastPrice) || 0;
-      var avg = Number(pos.avgCost) || 0;
       var side = positionSide(pos);
+      var m = positionMetrics(pos);
+      var last = m.last;
+      var avg = m.avg;
       var leverage = Number(pos.leverage) || 1;
-      var marketValue = pos.marketValue != null ? pos.marketValue : qty * last;
-      var unrealized = pos.unrealizedPnl != null ? pos.unrealizedPnl : (side === 'long' ? (last - avg) : (avg - last)) * qty;
-      var unrealizedPct = pos.unrealizedPnlPct != null ? pos.unrealizedPnlPct : (avg ? (unrealized / (avg * qty)) * 100 : 0);
-      var today = pos.todayPnl != null ? pos.todayPnl : 0;
       var risk = pos.riskRatio != null ? Number(pos.riskRatio) : null;
       var rowCls = risk != null && risk >= 0.9 ? ' class="row-risk-critical"'
         : (risk != null && risk >= 0.8 ? ' class="row-risk-high"' : '');
@@ -3700,10 +4418,10 @@
         '<td class="ta-r num">' + (pos.margin != null ? fmtMoney(pos.margin, pos.currency) : '--') + '</td>' +
         '<td class="ta-r num">' + (pos.liqPrice != null ? fmtPrice(pos.liqPrice, pos.symbol) : '--') + '</td>' +
         '<td class="ta-r num risk-text ' + riskClass(risk) + '">' + fmtRisk(risk) + '</td>' +
-        '<td class="ta-r num" data-col="market-value">' + fmtMoney(marketValue, pos.currency) + '</td>' +
-        '<td class="ta-r num ' + pnlClass(unrealized) + '" data-col="unrealized">' + fmtSignedMoney(unrealized, pos.currency) + '</td>' +
-        '<td class="ta-r num ' + pnlClass(unrealized) + '" data-col="unrealized-pct">' + fmtPct(unrealizedPct) + '</td>' +
-        '<td class="ta-r num ' + pnlClass(today) + '" data-col="today-pnl">' + fmtSignedMoney(today, pos.currency) + '</td>' +
+        '<td class="ta-r num" data-col="market-value">' + fmtMoney(m.marketValue, pos.currency) + '</td>' +
+        '<td class="ta-r num ' + pnlClass(m.unrealized) + '" data-col="unrealized">' + fmtSignedMoney(m.unrealized, pos.currency) + '</td>' +
+        '<td class="ta-r num ' + pnlClass(m.unrealizedPct) + '" data-col="unrealized-pct">' + fmtPct(m.unrealizedPct) + '</td>' +
+        '<td class="ta-r num ' + pnlClass(m.today) + '" data-col="today-pnl">' + fmtSignedMoney(m.today, pos.currency) + '</td>' +
         '<td class="ta-r num">' + (pos.accruedInterest != null && Number(pos.accruedInterest) > 0
           ? fmtMoney(pos.accruedInterest, pos.currency) : '--') + '</td>' +
         '<td class="ta-r cell-actions"><button type="button" class="link-btn is-danger" data-action="close" data-symbol="' +
@@ -4251,7 +4969,9 @@
       selectAccount(event.target.value);
     });
     on($('#btn-new-account'), 'click', function () { openCreateAccount(false); });
+    on($('#btn-account-settings'), 'click', openAccountSettings);
     on($('#btn-reset-account'), 'click', openResetAccount);
+    on($('#new-account-currency'), 'change', updateCapitalUnit);
     on($('#btn-help'), 'click', openHelp);
     on($('#toggle-hints'), 'change', function (event) { setNewbieHints(event.target.checked); });
     on($('#btn-replay-onboarding'), 'click', replayOnboarding);
@@ -4320,7 +5040,41 @@
     on($('#btn-cancel-account'), 'click', function () {
       if (!state.accountModalRequired) closeModal('modal-account');
     });
-    on($('#btn-create-account'), 'click', submitCreateAccount);
+    on($('#btn-create-account'), 'click', submitAccountSettings);
+    on($('#settings-presets'), 'click', function (event) {
+      var btn = event.target.closest('[data-preset]');
+      if (btn) applySettingsPreset(btn.getAttribute('data-preset'));
+    });
+    on($('#settings-mult-range'), 'input', function () {
+      state.settingsPreset = null;
+      state.settingsFormDirty = true;
+      updateSettingsMultiplierUI();
+    });
+    on($('#settings-mult-quick'), 'click', function (event) {
+      var btn = event.target.closest('[data-mult]');
+      if (!btn || btn.disabled) return;
+      state.settingsFormDirty = true;
+      setMultiplierValue(Number(btn.getAttribute('data-mult')));
+    });
+    on($('#btn-settings-reset-all'), 'click', resetSettingsToDefaults);
+    on($('#account-settings-fields'), 'input', function () {
+      state.settingsPreset = null;
+      state.settingsFormDirty = true;
+      updateSettingsMultiplierUI();
+    });
+    on($('#account-settings-fields'), 'click', function (event) {
+      var btn = event.target.closest('[data-setting-reset]');
+      if (!btn || btn.disabled) return;
+      var path = btn.getAttribute('data-setting-reset');
+      var field = settingsFieldByPath(path);
+      var input = document.querySelector('#account-settings-fields [data-setting-path="' + path + '"]');
+      if (!field || !input) return;
+      var value = getPath(defaultSettingsDeep(), path);
+      input.value = settingDisplayInputValue(field, value);
+      state.settingsPreset = null;
+      state.settingsFormDirty = true;
+      updateSettingsMultiplierUI();
+    });
     on($('#new-account-capital'), 'keydown', function (event) {
       if (event.key === 'Enter') submitCreateAccount();
     });
@@ -4365,6 +5119,7 @@
     on($('#order-sl'), 'input', function () { renderOrderHint(); });
     on($('#margin-mode-badge'), 'click', openMarginModeModal);
     on($('#btn-margin-mode'), 'click', openMarginModeModal);
+    on($('#account-multiplier-badge'), 'click', openAccountSettings);
     on($('#btn-apply-margin-mode'), 'click', applyMarginMode);
     on($('#order-submit'), 'click', submitOrder);
     on($('#order-submit'), 'keydown', function (event) {

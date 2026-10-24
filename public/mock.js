@@ -24,21 +24,59 @@
   var SLIPPAGE_BPS = { cn: 1, hk: 1, us: 1, fx: 2, crypto: 3 };
   var MARKET_VOL = { cn: 0.012, hk: 0.016, us: 0.018, fx: 0.0025, crypto: 0.026 };
   var FEES = {
-    cn: { commissionRate: 0.00025, commissionMin: 5, stampDutyRate: 0.0005, transferFeeRate: 0.00001 },
-    hk: { commissionRate: 0.00025, commissionMin: 100, stampDutyRate: 0.001, exchangeFeeRate: 0.0000565, settlementFeeRate: 0.00002 },
-    us: { perShare: 0.005, commissionMin: 1, secFeeRate: 0.0000278 },
-    fx: { spreadBps: 1.5 },
+    cn: { commissionRate: 0.00025, commissionMin: 5, stampDutyRate: 0.0005, stampDutySide: 'sell', transferFeeRate: 0.00001 },
+    hk: { commissionRate: 0.00025, commissionMin: 100, stampDutyRate: 0.001, stampDutySide: 'both', exchangeFeeRate: 0.0000565, settlementFeeRate: 0.00002 },
+    us: { perShare: 0.005, commissionMin: 1, secFeeRate: 0.0000278, secFeeSide: 'sell' },
+    fx: { spreadBps: 1.5, commissionRate: 0 },
     crypto: { commissionRate: 0.001 }
   };
 
-  // v2 leverage / margin presets (mirror config.json).
+  // v3 defaults: account settings deep-merge over these.
   var MARGIN = {
-    mmr: { cn: 1, hk: 0.125, us: 0.125, fx: 0.005, crypto: 0.005 },
+    mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 },
     interestAnnual: { cn: 0, hk: 0.06, us: 0.06, fx: 0.03, crypto: 0.08 },
     liquidationFeeRate: { cn: 0, hk: 0.002, us: 0.002, fx: 0, crypto: 0.005 }
   };
-  var MAX_LEVERAGE = { cn: 1, hk: 4, us: 4, fx: 100, crypto: 20 };
+  var BASE_LEVERAGE = { cn: 1, hk: 10, us: 10, fx: 200, crypto: 100 };
+  var LEVERAGE_CEILING = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125 };
+  var MAX_LEVERAGE = LEVERAGE_CEILING;
   var ALLOW_SHORT = { cn: false, hk: true, us: true, fx: true, crypto: true };
+  var DEFAULT_SETTINGS = {
+    leverageMultiplier: 1,
+    fees: clone(FEES),
+    slippageBps: clone(SLIPPAGE_BPS),
+    margin: clone(MARGIN),
+    autoConvert: true,
+    fxConvertSpread: FX_CONVERT_SPREAD
+  };
+  var SETTINGS_RANGES = {
+    initialCapital: [1000, 1000000000],
+    leverageMultiplier: [0.1, 2],
+    fees: {
+      commissionRate: [0, 0.005], commissionMin: [0, 500],
+      stampDutyRate: [0, 0.005], transferFeeRate: [0, 0.001],
+      exchangeFeeRate: [0, 0.001], settlementFeeRate: [0, 0.001],
+      perShare: [0, 0.1], secFeeRate: [0, 0.001], spreadBps: [0, 100]
+    },
+    slippageBps: [0, 200],
+    margin: {
+      mmr: { hk: [0.005, 0.5], us: [0.005, 0.5], fx: [0.0005, 0.1], crypto: [0.0005, 0.1] },
+      interestAnnual: [0, 0.5], liquidationFeeRate: [0, 0.05]
+    },
+    fxConvertSpread: [0, 0.02]
+  };
+  var SETTINGS_PRESETS = {
+    conservative: { leverageMultiplier: 0.1, margin: { mmr: { cn: 1, hk: 0.1, us: 0.1, fx: 0.005, crypto: 0.01 } } },
+    recommended: { leverageMultiplier: 1, margin: { mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 } } },
+    aggressive: { leverageMultiplier: 2, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.002, crypto: 0.004 } } }
+  };
+  var SETTINGS_MARKETS = [
+    { id: 'cn', name: 'A股', currency: 'CNY', baseLeverage: 1, maxLeverageCeiling: 1, shortable: false },
+    { id: 'hk', name: '港股', currency: 'HKD', baseLeverage: 10, maxLeverageCeiling: 20, shortable: true },
+    { id: 'us', name: '美股', currency: 'USD', baseLeverage: 10, maxLeverageCeiling: 20, shortable: true },
+    { id: 'fx', name: '外汇', currency: 'USD', baseLeverage: 200, maxLeverageCeiling: 500, shortable: true },
+    { id: 'crypto', name: '加密', currency: 'USDT', baseLeverage: 100, maxLeverageCeiling: 125, shortable: true }
+  ];
 
   var MARKET_META = [
     {
@@ -383,32 +421,38 @@
 
   // ------------------------------------------------------------ fee engine
 
-  function calcFees(market, side, qty, price) {
+  function calcFees(market, side, qty, price, cfgOverride) {
     var notional = qty * price;
     var total = 0;
     var breakdown = {};
+    var cfg = cfgOverride || FEES[market] || {};
+    var sideApplies = function (rule) { return !rule || rule === 'both' || rule === side; };
     if (market === 'cn') {
-      var commission = Math.max(notional * FEES.cn.commissionRate, FEES.cn.commissionMin);
-      var stamp = side === 'sell' ? notional * FEES.cn.stampDutyRate : 0;
-      var transfer = notional * FEES.cn.transferFeeRate;
+      var commission = Math.max(notional * cfg.commissionRate, cfg.commissionMin);
+      var stamp = sideApplies(cfg.stampDutySide) ? notional * cfg.stampDutyRate : 0;
+      var transfer = notional * cfg.transferFeeRate;
       breakdown = { commission: commission, stampDuty: stamp, transferFee: transfer };
       total = commission + stamp + transfer;
     } else if (market === 'hk') {
-      var hkCommission = Math.max(notional * FEES.hk.commissionRate, FEES.hk.commissionMin);
-      var hkStamp = notional * FEES.hk.stampDutyRate;
-      var exchange = notional * FEES.hk.exchangeFeeRate;
-      var settlement = notional * FEES.hk.settlementFeeRate;
+      var hkCommission = Math.max(notional * cfg.commissionRate, cfg.commissionMin);
+      var hkStamp = sideApplies(cfg.stampDutySide) ? notional * cfg.stampDutyRate : 0;
+      var exchange = notional * cfg.exchangeFeeRate;
+      var settlement = notional * cfg.settlementFeeRate;
       breakdown = { commission: hkCommission, stampDuty: hkStamp, exchangeFee: exchange, settlementFee: settlement };
       total = hkCommission + hkStamp + exchange + settlement;
     } else if (market === 'us') {
-      var perShare = Math.max(qty * FEES.us.perShare, FEES.us.commissionMin);
-      var sec = side === 'sell' ? notional * FEES.us.secFeeRate : 0;
+      var perShare = Math.max(qty * cfg.perShare, cfg.commissionMin);
+      var sec = sideApplies(cfg.secFeeSide) ? notional * cfg.secFeeRate : 0;
       breakdown = { commission: perShare, secFee: sec };
       total = perShare + sec;
     } else if (market === 'crypto') {
-      var cryptoCommission = notional * FEES.crypto.commissionRate;
+      var cryptoCommission = notional * cfg.commissionRate;
       breakdown = { commission: cryptoCommission };
       total = cryptoCommission;
+    } else if (market === 'fx') {
+      // FX spread is charged through the fill price; keep fee total 0 here.
+      breakdown = { spreadBps: cfg.spreadBps };
+      total = 0;
     } else {
       breakdown = {};
       total = 0;
@@ -416,20 +460,21 @@
     return { total: round2(total), breakdown: breakdown };
   }
 
-  function slippageBps(market) { return SLIPPAGE_BPS[market] || 0; }
+  function slippageBpsFor(account, market) { return effectiveSlippage(account, market); }
 
-  function marketFillPrice(symbol, side) {
+  function marketFillPrice(symbol, side, account) {
     var q = quoteState(symbol);
     var market = q.market;
     var digits = priceDigits(market, q.price);
     if (market === 'fx') {
-      var half = (FEES.fx.spreadBps / 2) / 10000;
+      var fxCfg = account ? effectiveFeeConfig(account, 'fx') : FEES.fx;
+      var half = (Number(fxCfg.spreadBps) / 2) / 10000;
       return roundTo(side === 'buy' ? q.price * (1 + half) : q.price * (1 - half), digits);
     }
     var base = side === 'buy'
       ? (q.ask[0] ? q.ask[0].price : q.price)
       : (q.bid[0] ? q.bid[0].price : q.price);
-    var slip = slippageBps(market) / 10000;
+    var slip = (account ? effectiveSlippage(account, market) : (SLIPPAGE_BPS[market] || 0)) / 10000;
     return roundTo(side === 'buy' ? base * (1 + slip) : base * (1 - slip), digits);
   }
 
@@ -511,6 +556,7 @@
       baseCurrency: currency,
       initialCapital: capital,
       marginMode: options.marginMode === 'cross' ? 'cross' : 'isolated',
+      settings: deepMerge(DEFAULT_SETTINGS, options.settings || {}),
       createdAt: nowISO(),
       cash: cash,
       positions: {},
@@ -590,6 +636,7 @@
           Object.keys(state.accounts).forEach(function (id) {
             var acc = state.accounts[id];
             if (!acc.marginMode) acc.marginMode = 'isolated';
+            acc.settings = deepMerge(DEFAULT_SETTINGS, acc.settings || {});
             if (!Array.isArray(acc.liquidations)) acc.liquidations = [];
             if (acc.totalInterest == null) acc.totalInterest = 0;
             Object.keys(acc.positions || {}).forEach(function (symbol) {
@@ -638,13 +685,146 @@
     return account;
   }
 
+  // ------------------------------------------------------- v3 account params
+
+  function deepMerge(base, patch) {
+    var out = clone(base || {});
+    if (!patch || typeof patch !== 'object') return out;
+    Object.keys(patch).forEach(function (key) {
+      var value = patch[key];
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        out[key] = deepMerge(out[key] || {}, value);
+      } else {
+        out[key] = clone(value);
+      }
+    });
+    return out;
+  }
+
+  function accountSettings(account) {
+    return deepMerge(DEFAULT_SETTINGS, account.settings || {});
+  }
+
+  function accountEffective(account) {
+    var settings = accountSettings(account);
+    var multiplier = Number(settings.leverageMultiplier);
+    if (!isFinite(multiplier)) multiplier = 1;
+    var leverage = {};
+    MARKET_ORDER.forEach(function (market) {
+      leverage[market] = market === 'cn' ? 1
+        : Math.min(LEVERAGE_CEILING[market], Math.max(1, Math.round(BASE_LEVERAGE[market] * multiplier)));
+    });
+    return {
+      leverage: leverage,
+      fees: settings.fees,
+      slippageBps: settings.slippageBps,
+      margin: settings.margin,
+      autoConvert: settings.autoConvert !== false,
+      fxConvertSpread: Number(settings.fxConvertSpread)
+    };
+  }
+
+  function effectiveFeeConfig(account, market) {
+    var eff = accountEffective(account);
+    return (eff.fees && eff.fees[market]) || FEES[market] || {};
+  }
+
+  function effectiveSlippage(account, market) {
+    var eff = accountEffective(account);
+    var value = eff.slippageBps ? Number(eff.slippageBps[market]) : NaN;
+    return isFinite(value) ? value : (SLIPPAGE_BPS[market] || 0);
+  }
+
+  function effectiveMmr(account, market) {
+    var eff = accountEffective(account);
+    var value = eff.margin && eff.margin.mmr ? Number(eff.margin.mmr[market]) : NaN;
+    if (!isFinite(value)) value = MARGIN.mmr[market] != null ? MARGIN.mmr[market] : 0.1;
+    return value;
+  }
+
+  function effectiveInterest(account, market) {
+    var eff = accountEffective(account);
+    var value = eff.margin && eff.margin.interestAnnual ? Number(eff.margin.interestAnnual[market]) : NaN;
+    return isFinite(value) ? value : (MARGIN.interestAnnual[market] || 0);
+  }
+
+  function effectiveLiqFee(account, market) {
+    var eff = accountEffective(account);
+    var value = eff.margin && eff.margin.liquidationFeeRate ? Number(eff.margin.liquidationFeeRate[market]) : NaN;
+    return isFinite(value) ? value : (MARGIN.liquidationFeeRate[market] || 0);
+  }
+
+  function hasOpenRisk(account) {
+    var hasPositions = Object.keys(account.positions || {}).some(function (key) {
+      return account.positions[key] && account.positions[key].qty > 1e-9;
+    });
+    var hasOrders = (account.orders || []).some(function (order) { return order.status === 'open'; });
+    return hasPositions || hasOrders;
+  }
+
+  function checkSettingRange(value, range, label) {
+    if (!isFinite(value)) fail(400, 'SETTINGS_INVALID', label + ' 不是有效数字');
+    if (range && (value < range[0] - 1e-12 || value > range[1] + 1e-12)) {
+      fail(400, 'SETTINGS_INVALID', label + ' 超出范围 [' + range[0] + ', ' + range[1] + ']');
+    }
+  }
+
+  function validateAccountSettings(input) {
+    var settings = deepMerge(DEFAULT_SETTINGS, input || {});
+    checkSettingRange(Number(settings.leverageMultiplier), SETTINGS_RANGES.leverageMultiplier, '杠杆上限倍率');
+    Object.keys(SETTINGS_RANGES.fees).forEach(function (key) {
+      var feeKeys = {
+        commissionRate: ['cn', 'hk', 'crypto'], commissionMin: ['cn', 'hk', 'us'],
+        stampDutyRate: ['cn', 'hk'], transferFeeRate: ['cn'], exchangeFeeRate: ['hk'],
+        settlementFeeRate: ['hk'], perShare: ['us'], secFeeRate: ['us'], spreadBps: ['fx']
+      }[key] || [];
+      feeKeys.forEach(function (market) {
+        if (settings.fees && settings.fees[market] && settings.fees[market][key] != null) {
+          checkSettingRange(Number(settings.fees[market][key]), SETTINGS_RANGES.fees[key], market + ' ' + key);
+        }
+      });
+    });
+    MARKET_ORDER.forEach(function (market) {
+      if (settings.slippageBps && settings.slippageBps[market] != null) {
+        checkSettingRange(Number(settings.slippageBps[market]), SETTINGS_RANGES.slippageBps, market + ' 滑点');
+      }
+    });
+    ['hk', 'us', 'fx', 'crypto'].forEach(function (market) {
+      var mmr = settings.margin && settings.margin.mmr ? Number(settings.margin.mmr[market]) : NaN;
+      checkSettingRange(mmr, SETTINGS_RANGES.margin.mmr[market], market + ' mmr');
+      var lev = Math.min(LEVERAGE_CEILING[market], Math.max(1, Math.round(BASE_LEVERAGE[market] * Number(settings.leverageMultiplier))));
+      if (mmr > 0.9 / lev + 1e-12) fail(400, 'SETTINGS_INVALID', market + ' mmr 需 ≤ 0.9 / ' + lev + 'x');
+      checkSettingRange(Number(settings.margin.interestAnnual[market]), SETTINGS_RANGES.margin.interestAnnual, market + ' 利率');
+      checkSettingRange(Number(settings.margin.liquidationFeeRate[market]), SETTINGS_RANGES.margin.liquidationFeeRate, market + ' 强平费');
+    });
+    checkSettingRange(Number(settings.fxConvertSpread), SETTINGS_RANGES.fxConvertSpread, '换汇成本');
+    return settings;
+  }
+
+  function settingsMetaPayload() {
+    return {
+      markets: clone(SETTINGS_MARKETS),
+      ranges: clone(SETTINGS_RANGES),
+      presets: clone(SETTINGS_PRESETS),
+      multiplier: { range: [0.1, 2], default: 1, quick: [0.1, 0.25, 0.5, 1, 2] },
+      defaults: {
+        settings: clone(DEFAULT_SETTINGS),
+        initialCapital: 1000000,
+        baseCurrency: 'CNY'
+      }
+    };
+  }
+
   // Buying power per currency: native cash plus base-currency CNY converted at
   // the live rate minus the 0.3% conversion cost.
   function buyingPowerFor(account, currency) {
     var native = Number(account.cash[currency]) || 0;
     if (currency === 'CNY') return round2(native);
+    var eff = accountEffective(account);
+    if (eff.autoConvert === false) return round2(native);
     var rate = CNY_PER[currency] || 1;
-    var converted = (Number(account.cash.CNY) || 0) * (1 - FX_CONVERT_SPREAD) / rate;
+    var spread = isFinite(eff.fxConvertSpread) ? eff.fxConvertSpread : FX_CONVERT_SPREAD;
+    var converted = (Number(account.cash.CNY) || 0) * (1 - spread) / rate;
     return round2(native + Math.max(0, converted));
   }
 
@@ -675,16 +855,16 @@
     return (pos.side === 'short' ? pos.avgCost - price : price - pos.avgCost) * pos.qty;
   }
 
-  function maintenanceOf(pos, price) {
+  function maintenanceOf(pos, price, account) {
     if (!pos || (Number(pos.leverage) || 1) <= 1 || pos.market === 'cn') return 0;
-    var mmr = MARGIN.mmr[pos.market] != null ? MARGIN.mmr[pos.market] : 0.1;
+    var mmr = account ? effectiveMmr(account, pos.market) : (MARGIN.mmr[pos.market] != null ? MARGIN.mmr[pos.market] : 0.1);
     return price * pos.qty * mmr;
   }
 
-  function liqPriceOf(pos, mode) {
+  function liqPriceOf(pos, mode, account) {
     if (!pos || (Number(pos.leverage) || 1) <= 1 || pos.market === 'cn') return null;
     if (mode === 'cross') return null;
-    var mmr = MARGIN.mmr[pos.market] != null ? MARGIN.mmr[pos.market] : 0.1;
+    var mmr = account ? effectiveMmr(account, pos.market) : (MARGIN.mmr[pos.market] != null ? MARGIN.mmr[pos.market] : 0.1);
     var margin = Number(pos.margin) || 0;
     if (pos.side === 'short') {
       return roundPrice(pos.symbol, (pos.avgCost * pos.qty + margin) / (pos.qty * (1 + mmr)));
@@ -697,7 +877,7 @@
     Object.keys(account.positions || {}).forEach(function (symbol) {
       var pos = account.positions[symbol];
       if (!pos || (Number(pos.leverage) || 1) <= 1) return;
-      var annual = MARGIN.interestAnnual[pos.market] || 0;
+      var annual = effectiveInterest(account, pos.market);
       if (!annual || !pos.debt) return;
       var last = Date.parse(pos.lastInterestAt) || now;
       var hours = Math.max(0, now - last) / 3600000;
@@ -733,7 +913,7 @@
       var pos = account.positions[symbol];
       if (!pos || pos.qty <= 1e-9) return;
       var q = quoteState(symbol) || { price: pos.avgCost };
-      var value = cross ? maintenanceOf(pos, q.price) : (Number(pos.margin) || 0);
+      var value = cross ? maintenanceOf(pos, q.price, account) : (Number(pos.margin) || 0);
       total += value * (fxRates[pos.currency] || 1);
     });
     return total;
@@ -758,15 +938,17 @@
 
   function debitCash(account, currency, amount) {
     if (!(amount > 0)) return true;
+    var eff = accountEffective(account);
     var native = Number(account.cash[currency]) || 0;
     if (native + 1e-9 >= amount) {
       account.cash[currency] = round2(native - amount);
       return true;
     }
-    if (currency === 'CNY') return false;
+    if (currency === 'CNY' || eff.autoConvert === false) return false;
     var shortfall = amount - native;
     var convertAmount = Math.ceil(shortfall * 100) / 100 + 0.01;
-    var needCny = convertAmount * (CNY_PER[currency] || 1) / (1 - FX_CONVERT_SPREAD);
+    var spread = isFinite(eff.fxConvertSpread) ? eff.fxConvertSpread : FX_CONVERT_SPREAD;
+    var needCny = convertAmount * (CNY_PER[currency] || 1) / (1 - spread);
     if ((Number(account.cash.CNY) || 0) + 1e-9 < needCny) return false;
     account.cash.CNY = round2(account.cash.CNY - needCny);
     account.cash[currency] = round2(native + convertAmount - amount);
@@ -792,9 +974,9 @@
     var pos = account.positions[symbol];
     if (!pos) return;
     var closingSide = pos.side === 'long' ? 'sell' : 'buy';
-    var fees = calcFees(pos.market, closingSide, pos.qty, price).total;
+    var fees = calcFees(pos.market, closingSide, pos.qty, price, effectiveFeeConfig(account, pos.market)).total;
     var liqFee = reason === 'LIQUIDATION'
-      ? (MARGIN.liquidationFeeRate[pos.market] || 0) * price * pos.qty
+      ? effectiveLiqFee(account, pos.market) * price * pos.qty
       : 0;
     var interest = Number(pos.accruedInterest) || 0;
     var gross = unrealizedOf(pos, price);
@@ -837,7 +1019,7 @@
         var q = quoteState(symbol);
         if (!q) return;
         var posEquity = (Number(pos.margin) || 0) + unrealizedOf(pos, q.price) - (Number(pos.accruedInterest) || 0);
-        if (posEquity <= maintenanceOf(pos, q.price)) forceClosePosition(account, symbol, q.price, 'LIQUIDATION');
+        if (posEquity <= maintenanceOf(pos, q.price, account)) forceClosePosition(account, symbol, q.price, 'LIQUIDATION');
       });
     } else {
       var guard = 0;
@@ -849,7 +1031,7 @@
           var pos = account.positions[symbol];
           if (!pos) return;
           var q = quoteState(symbol);
-          maintenanceTotal += maintenanceOf(pos, q ? q.price : pos.avgCost) * (fxRates[pos.currency] || 1);
+          maintenanceTotal += maintenanceOf(pos, q ? q.price : pos.avgCost, account) * (fxRates[pos.currency] || 1);
         });
         if (equity > maintenanceTotal + 1e-9) break;
         var worstSymbol = null;
@@ -875,12 +1057,13 @@
     if (!item) fail(400, 'UNKNOWN_SYMBOL', '未知标的：' + req.symbol);
     if (item.code === 'sh000001') fail(400, 'NOT_TRADEABLE', '指数仅用于展示，不可交易');
     var market = item.market;
-    var maxLev = MAX_LEVERAGE[market] || 1;
+    var eff = accountEffective(account);
+    var maxLev = eff.leverage[market] || 1;
     var close = !!req.close;
     var leverage = Number(req.leverage);
     if (!Number.isFinite(leverage) || leverage <= 0) leverage = 1;
     if (market === 'cn' && leverage > 1) fail(400, 'LEVERAGE_NOT_ALLOWED', 'A股不支持杠杆（恒 1x）');
-    if (leverage > maxLev + 1e-9) fail(400, 'LEVERAGE_INVALID', '杠杆超出上限：' + market + ' 最大 ' + maxLev + 'x');
+    if (leverage > maxLev + 1e-9) fail(400, 'LEVERAGE_NOT_ALLOWED', '超过当前账户杠杆上限 ' + maxLev + 'x');
     var side = req.side === 'sell' ? 'sell' : 'buy';
     var pos = account.positions[req.symbol];
 
@@ -921,7 +1104,7 @@
     }
 
     var q = quoteState(req.symbol);
-    var estimatePrice = type === 'limit' ? limitPrice : marketFillPrice(req.symbol, side);
+    var estimatePrice = type === 'limit' ? limitPrice : marketFillPrice(req.symbol, side, account);
     var extra = extraFor(q);
     if (market === 'cn' && extra.limitUp != null) {
       var checkPrice = type === 'limit' ? limitPrice : estimatePrice;
@@ -945,7 +1128,7 @@
     }
 
     if (!close && type === 'market') {
-      var fees = calcFees(market, side, qty, estimatePrice).total;
+      var fees = calcFees(market, side, qty, estimatePrice, effectiveFeeConfig(account, market)).total;
       var margin = (qty * estimatePrice) / leverage;
       var currency = CURRENCY[market];
       if (leverage > 1) {
@@ -980,7 +1163,7 @@
     if (order.close) {
       if (!pos) return { error: 'INSUFFICIENT_POSITION' };
       if (order.qty > pos.qty + 1e-9) return { error: 'INSUFFICIENT_POSITION' };
-      var fees = calcFees(market, order.side, order.qty, fillPrice).total;
+      var fees = calcFees(market, order.side, order.qty, fillPrice, effectiveFeeConfig(account, market)).total;
       var ratio = order.qty / pos.qty;
       var marginShare = (Number(pos.margin) || 0) * ratio;
       var interestShare = (Number(pos.accruedInterest) || 0) * ratio;
@@ -1002,7 +1185,7 @@
     } else {
       var lev = Number(order.leverage) || 1;
       var notional = order.qty * fillPrice;
-      var feeAmount = calcFees(market, order.side, order.qty, fillPrice).total;
+      var feeAmount = calcFees(market, order.side, order.qty, fillPrice, effectiveFeeConfig(account, market)).total;
       var marginAmount = notional / lev;
       var targetSide = pos ? pos.side : (order.side === 'buy' ? 'long' : 'short');
       if (lev > 1) {
@@ -1066,7 +1249,7 @@
     };
     var fillPrice = null;
     if (order.type === 'market') {
-      fillPrice = marketFillPrice(order.symbol, order.side);
+      fillPrice = marketFillPrice(order.symbol, order.side, account);
     } else {
       var q = quoteState(order.symbol);
       var marketable = order.side === 'buy' ? q.price <= order.limitPrice : q.price >= order.limitPrice;
@@ -1161,7 +1344,7 @@
       var notional = round2(pos.qty * lastPrice);
       var marketValue = notional;
       var unrealizedPnl = round2(unrealizedOf(pos, lastPrice));
-      var maintenance = round2(maintenanceOf(pos, lastPrice));
+      var maintenance = round2(maintenanceOf(pos, lastPrice, account));
       var posEquity = margin + unrealizedPnl - accrued;
       var riskRatio = posEquity > 1e-9 ? round2(maintenance / posEquity * 10000) / 10000 : 1;
       var equityContrib = posEquity * (fxRates[pos.currency] || 1);
@@ -1179,7 +1362,7 @@
         unrealizedPnl: unrealizedPnl,
         unrealizedPnlPct: pos.avgCost ? round2((unrealizedPnl / (pos.avgCost * pos.qty)) * 100) : 0,
         todayPnl: todayPnl,
-        liqPrice: liqPriceOf(pos, account.marginMode),
+        liqPrice: liqPriceOf(pos, account.marginMode, account),
         riskRatio: riskRatio,
         accruedInterest: round2(accrued),
         debt: round2(Number(pos.debt) || 0),
@@ -1240,8 +1423,11 @@
       totalPnlPct: account.initialCapital ? round2((totalPnl / account.initialCapital) * 100) : 0,
       fxRates: fxRates,
       buyingPower: buyingPowerAll(account),
-      autoConvert: true,
-      fxConvertSpread: FX_CONVERT_SPREAD,
+      autoConvert: accountEffective(account).autoConvert,
+      fxConvertSpread: accountEffective(account).fxConvertSpread,
+      settings: accountSettings(account),
+      effective: accountEffective(account),
+      settingsLocked: hasOpenRisk(account),
       marginMode: mode,
       marginUsed: round2(marginUsedCny),
       marginAvailable: marginAvailable,
@@ -1391,11 +1577,14 @@
       };
     }
 
+    if (pathname === '/api/settings/meta') return settingsMetaPayload();
+
     if (pathname === '/api/markets') {
       return {
         markets: MARKET_META.map(function (meta) {
           var copy = clone(meta);
-          copy.maxLeverage = MAX_LEVERAGE[meta.id] || 1;
+          copy.maxLeverage = LEVERAGE_CEILING[meta.id] || 1;
+          copy.baseLeverage = BASE_LEVERAGE[meta.id] || 1;
           copy.mmr = MARGIN.mmr[meta.id] != null ? MARGIN.mmr[meta.id] : 0;
           copy.shortable = !!ALLOW_SHORT[meta.id];
           return copy;
@@ -1481,15 +1670,36 @@
     if (pathname === '/api/accounts' && method === 'POST') {
       var name = String(body.name || '').trim() || ('账户 ' + (Object.keys(state.accounts).length + 1));
       var capital = Number(body.initialCapital);
-      if (!Number.isFinite(capital) || capital <= 0) fail(400, 'INVALID_CAPITAL', '初始资金必须大于 0');
+      if (!Number.isFinite(capital) || capital < 1000 || capital > 1000000000) {
+        fail(400, 'INVALID_CAPITAL', '初始资金需在 1000 – 1,000,000,000 之间');
+      }
+      var createSettings = validateAccountSettings(body.settings || {});
       var account = newAccount({
         name: name, initialCapital: capital,
         baseCurrency: body.baseCurrency || 'CNY',
-        marginMode: body.marginMode
+        marginMode: body.marginMode,
+        settings: createSettings
       });
       state.accounts[account.id] = account;
       saveState();
       return { account: accountSummary(account) };
+    }
+
+    match = pathname.match(/^\/api\/accounts\/([^/]+)\/settings$/);
+    if (match && method === 'PATCH') {
+      var accSettings = getAccount(decodeURIComponent(match[1]));
+      var patch = (body && body.settings) || {};
+      var locked = hasOpenRisk(accSettings);
+      var touchesRisk = patch.leverageMultiplier != null ||
+        (patch.margin && patch.margin.mmr);
+      if (locked && touchesRisk) {
+        fail(409, 'SETTINGS_LOCKED', '有持仓或挂单时不能修改杠杆倍率与保证金参数');
+      }
+      var merged = deepMerge(accountSettings(accSettings), patch);
+      var validated = validateAccountSettings(merged);
+      accSettings.settings = validated;
+      saveState();
+      return { account: accountSummary(accSettings) };
     }
 
     match = pathname.match(/^\/api\/accounts\/([^/]+)\/positions\/([^/]+)\/protect$/);
@@ -1597,7 +1807,8 @@
       if (!Number.isFinite(resetCapital) || resetCapital <= 0) fail(400, 'INVALID_CAPITAL', '初始资金必须大于 0');
       var fresh = newAccount({
         id: accReset.id, name: accReset.name, initialCapital: resetCapital,
-        baseCurrency: accReset.baseCurrency, marginMode: accReset.marginMode
+        baseCurrency: accReset.baseCurrency, marginMode: accReset.marginMode,
+        settings: accReset.settings
       });
       state.accounts[accReset.id] = fresh;
       saveState();
@@ -1657,7 +1868,7 @@
       var ratio = Number(body.ratio);
       if (!isFinite(ratio) || ratio <= 0) fail(400, 'BAD_REQUEST', 'ratio 无效');
       var riskQuote = quoteState(riskSymbol) || { price: riskPos.avgCost };
-      var maintenance = maintenanceOf(riskPos, riskQuote.price);
+      var maintenance = maintenanceOf(riskPos, riskQuote.price, riskAccount);
       var desiredEquity = maintenance / ratio;
       var newMargin = desiredEquity + (Number(riskPos.accruedInterest) || 0) - unrealizedOf(riskPos, riskQuote.price);
       if (newMargin <= 0) fail(400, 'BAD_REQUEST', '无法调整到目标风险率');

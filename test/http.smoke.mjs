@@ -307,6 +307,79 @@ async function main() {
       console.log('WARN  加密行情不可用，跳过杠杆/保证金冒烟');
     }
 
+    // ---- v3 account-level settings / leverage multiplier --------------------
+    const settingsMeta = await api('/api/settings/meta');
+    check('GET /api/settings/meta exposes presets, ranges and multiplier',
+      settingsMeta.status === 200
+        && !!settingsMeta.body?.presets?.recommended
+        && Array.isArray(settingsMeta.body?.multiplier?.quick)
+        && Array.isArray(settingsMeta.body?.markets),
+      `presets=${Object.keys(settingsMeta.body?.presets || {}).length} quick=${settingsMeta.body?.multiplier?.quick}`);
+
+    const paramAccount = await api('/api/accounts', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: '参数测试账户',
+        initialCapital: 200000,
+        settings: {
+          leverageMultiplier: 0.2,
+          fees: { crypto: { commissionRate: 0.002 } },
+          slippageBps: { crypto: 5 },
+        },
+      }),
+    });
+    const paramId = paramAccount.body?.account?.id;
+    check('POST /api/accounts accepts account settings', paramAccount.status === 201 && !!paramId,
+      `status=${paramAccount.status} ${JSON.stringify(paramAccount.body?.error || '')}`);
+    if (paramId) {
+      const paramSnap = (await api(`/api/accounts/${paramId}`)).body;
+      check('settings override leverage caps (multiplier 0.2 -> crypto 20x)',
+        paramSnap?.effective?.leverage?.crypto === 20 && paramSnap?.effective?.leverage?.fx === 40,
+        `leverage=${JSON.stringify(paramSnap?.effective?.leverage)}`);
+      check('settings override fees/slippage',
+        paramSnap?.effective?.fees?.crypto?.commissionRate === 0.002
+          && paramSnap?.effective?.slippageBps?.crypto === 5,
+        `fee=${paramSnap?.effective?.fees?.crypto?.commissionRate} slip=${paramSnap?.effective?.slippageBps?.crypto}`);
+
+      const eth2 = (await api('/api/quotes?symbols=' + encodeURIComponent('crypto:ETHUSDT'))).body?.quotes?.[0];
+      if (eth2 && eth2.price > 0) {
+        const over = await api(`/api/accounts/${paramId}/orders`, {
+          method: 'POST',
+          body: JSON.stringify({ symbol: 'crypto:ETHUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 21 }),
+        });
+        check('leverage above the account cap is rejected',
+          over.status === 400 && over.body?.error?.code === 'LEVERAGE_NOT_ALLOWED',
+          `status=${over.status} code=${over.body?.error?.code}`);
+
+        const customFill = await api(`/api/accounts/${paramId}/orders`, {
+          method: 'POST',
+          body: JSON.stringify({ symbol: 'crypto:ETHUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 5 }),
+        });
+        const feePrice = Number(customFill.body?.fill?.price || 0);
+        const expectedFee = Math.round(feePrice * 0.1 * 0.002 * 100) / 100;
+        check('custom commission rate is applied to fills',
+          customFill.status === 201
+            && Math.abs(Number(customFill.body?.order?.fees) - expectedFee) <= 0.01,
+          `fees=${customFill.body?.order?.fees} expected≈${expectedFee}`);
+
+        const riskLock = await api(`/api/accounts/${paramId}/settings`, {
+          method: 'PATCH',
+          body: JSON.stringify({ settings: { leverageMultiplier: 1 } }),
+        });
+        check('risk settings are locked while a position is open',
+          riskLock.status === 409 && riskLock.body?.error?.code === 'SETTINGS_LOCKED',
+          `status=${riskLock.status} code=${riskLock.body?.error?.code}`);
+
+        const feePatch = await api(`/api/accounts/${paramId}/settings`, {
+          method: 'PATCH',
+          body: JSON.stringify({ settings: { fees: { crypto: { commissionRate: 0.0015 } } } }),
+        });
+        check('fee settings stay editable while a position is open',
+          feePatch.status === 200 && feePatch.body?.settings?.fees?.crypto?.commissionRate === 0.0015,
+          `status=${feePatch.status}`);
+      }
+    }
+
     const equity = await api(`/api/accounts/${accountId}/equity?range=all`);
     check('GET equity series returns points', Array.isArray(equity.body?.points),
       `${(equity.body?.points || []).length} points`);

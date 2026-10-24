@@ -1268,14 +1268,19 @@ test('leverage limits and A-share short selling are rejected', () => {
   // plain spot sell without a position is still INSUFFICIENT_POSITION (contract §6A.4)
   assert.equal(placeOrder(cnAccount, { symbol: 'cn:sh600519', side: 'sell', type: 'market', qty: 100 }, cnQuote(), { cfg: CFG, now: NOW_FRI }).error.code, 'INSUFFICIENT_POSITION');
 
+  // cfg override (v3 §6B): the server passes each account's effective cfg, so the
+  // leverage cap comes from cfg, not from the global config file.
+  const cryptoCfg = { ...CFG, leverage: { ...CFG.leverage, crypto: 20 } };
   const cryptoAccount = leveragedAccount();
-  assert.equal(placeOrder(cryptoAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 21 }, cryptoQuote(), { cfg: CFG, now: NOW_FRI }).error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.equal(placeOrder(cryptoAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 21 }, cryptoQuote(), { cfg: cryptoCfg, now: NOW_FRI }).error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.equal(placeOrder(cryptoAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 20 }, cryptoQuote(), { cfg: cryptoCfg, now: NOW_FRI }).error, null);
   assert.equal(placeOrder(cryptoAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 0.5 }, cryptoQuote(), { cfg: CFG, now: NOW_FRI }).error.code, 'LEVERAGE_NOT_ALLOWED');
 
+  const usCfg = { ...CFG, leverage: { ...CFG.leverage, us: 4 } };
   const usAccount = makeAccount({ baseCurrency: 'USD', initialCapital: 10000 });
-  assert.equal(placeOrder(usAccount, { symbol: 'us:usAAPL', side: 'buy', type: 'market', qty: 1, leverage: 5 }, usQuote(), { cfg: CFG, now: NOW_US_THU }).error.code, 'LEVERAGE_NOT_ALLOWED');
-  // the max leverage itself is accepted
-  assert.equal(placeOrder(usAccount, { symbol: 'us:usAAPL', side: 'buy', type: 'market', qty: 1, leverage: 4 }, usQuote(), { cfg: CFG, now: NOW_US_THU }).error, null);
+  assert.equal(placeOrder(usAccount, { symbol: 'us:usAAPL', side: 'buy', type: 'market', qty: 1, leverage: 5 }, usQuote(), { cfg: usCfg, now: NOW_US_THU }).error.code, 'LEVERAGE_NOT_ALLOWED');
+  // the cfg max leverage itself is accepted
+  assert.equal(placeOrder(usAccount, { symbol: 'us:usAAPL', side: 'buy', type: 'market', qty: 1, leverage: 4 }, usQuote(), { cfg: usCfg, now: NOW_US_THU }).error, null);
 });
 
 test('adding to a position requires the same leverage (LEVERAGE_MISMATCH)', () => {
@@ -1498,4 +1503,193 @@ test('store migrates v1 archives to the v2 position shape', () => {
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ===========================================================================
+// v3: account-level settings + cfg pass-through (§6B)
+// ===========================================================================
+
+test('store keeps account.settings across save/load (v3)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papertrader-store-v3-'));
+  try {
+    const settings = {
+      leverageMultiplier: 0.5,
+      fees: { ...CFG.fees, crypto: { ...CFG.fees.crypto, commissionRate: 0.002 } },
+      slippageBps: { cn: 2, hk: 3, us: 4, fx: 5, crypto: 6 },
+      margin: {
+        mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.002, crypto: 0.004 },
+        interestAnnual: { ...CFG.margin.interestAnnual },
+        liquidationFeeRate: { ...CFG.margin.liquidationFeeRate }
+      },
+      autoConvert: false,
+      fxConvertSpread: 0.005,
+      futureField: { nested: [1, 2, 3] } // unknown extension inside settings must survive
+    };
+    const store = createStore({ dataDir: dir, watchlist: [] });
+    store.load();
+    const account = makeAccount({ id: 'acc_settings' });
+    account.settings = settings;
+    store.addAccount(account);
+
+    const loaded = createStore({ dataDir: dir }).load().accounts.acc_settings;
+    assert.deepEqual(loaded.settings, settings);
+    assert.equal(loaded.settings.leverageMultiplier, 0.5);
+    assert.equal(loaded.settings.fees.crypto.commissionRate, 0.002);
+    assert.equal(loaded.settings.margin.mmr.crypto, 0.004);
+    assert.equal(loaded.settings.autoConvert, false);
+    assert.equal(loaded.settings.fxConvertSpread, 0.005);
+
+    // The restored settings still work as the account's effective cfg.
+    const effective = { ...CFG, ...loaded.settings };
+    assert.equal(calcFees('crypto', 'buy', 0.1, 60000, effective).total, 12); // 0.002 * 6000
+    assert.equal(calcFees('crypto', 'buy', 0.1, 60000, CFG).total, 6); // global 0.001
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('store loads v1/v2 archives without account.settings and keeps unknown state fields (v3)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papertrader-store-v3-legacy-'));
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const legacyState = {
+      version: 1,
+      createdAt: NOW_FRI,
+      bootstrapped: true, // top-level server flag that used to be dropped by the normalizer
+      accounts: {
+        acc_legacy: {
+          id: 'acc_legacy',
+          name: '旧账户',
+          baseCurrency: 'CNY',
+          initialCapital: 100000,
+          createdAt: NOW_FRI,
+          cash: { CNY: 100000, HKD: 0, USD: 0, USDT: 0 },
+          positions: {},
+          orders: [],
+          trades: [],
+          equityHistory: [{ t: NOW_FRI, equity: 100000 }],
+          dayStartEquity: 100000,
+          dayKey: '2026-10-23',
+          realizedPnl: 0,
+          totalFees: 0
+        }
+      },
+      watchlist: [],
+      alerts: []
+    };
+    fs.writeFileSync(path.join(dir, 'state.json'), JSON.stringify(legacyState), 'utf8');
+
+    const state = createStore({ dataDir: dir }).load();
+    assert.equal(state.bootstrapped, true); // unknown top-level flags are preserved
+    const loaded = state.accounts.acc_legacy;
+    assert.ok(loaded);
+    assert.deepEqual(loaded.settings, {}); // missing settings defaults to an empty object
+    assert.equal(loaded.marginMode, 'isolated');
+    assert.equal(loaded.cash.CNY, 100000);
+    // and a second save/load round trip stays clean
+    const second = createStore({ dataDir: dir });
+    second.load();
+    const account = second.getAccount('acc_legacy');
+    account.settings = { leverageMultiplier: 2 };
+    second.replaceAccount(account);
+    assert.deepEqual(createStore({ dataDir: dir }).load().accounts.acc_legacy.settings, { leverageMultiplier: 2 });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('calcFees uses the fees from the injected cfg (v3 effective cfg)', () => {
+  const cfgCrypto = { ...CFG, fees: { ...CFG.fees, crypto: { commissionRate: 0.002 } } };
+  assert.equal(calcFees('crypto', 'buy', 0.1, 60000, CFG).total, 6); // 0.001 * 6000
+  assert.equal(calcFees('crypto', 'buy', 0.1, 60000, cfgCrypto).total, 12); // 0.002 * 6000
+  assert.equal(calcFees('crypto', 'sell', 0.1, 60000, cfgCrypto).total, 12);
+
+  const cfgHk = { ...CFG, fees: { ...CFG.fees, hk: { ...CFG.fees.hk, commissionMin: 50 } } };
+  assert.equal(calcFees('hk', 'buy', 100, 200, CFG).breakdown.commission, 100); // config minimum
+  assert.equal(calcFees('hk', 'buy', 100, 200, cfgHk).breakdown.commission, 50); // cfg minimum
+});
+
+test('placeOrder uses the cfg leverage cap (v3 effective cfg)', () => {
+  const cfgCrypto20 = { ...CFG, leverage: { ...CFG.leverage, crypto: 20 } };
+  const account = leveragedAccount();
+  const rejected = placeOrder(account, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 21 }, cryptoQuote(), { cfg: cfgCrypto20, now: NOW_FRI });
+  assert.equal(rejected.error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.match(rejected.error.message, /20x/); // the cap comes from cfg, not the global file
+
+  const accepted = placeOrder(account, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 20 }, cryptoQuote(), { cfg: cfgCrypto20, now: NOW_FRI });
+  assert.equal(accepted.error, null);
+  assert.equal(accepted.order.leverage, 20);
+  assert.equal(account.positions['crypto:BTCUSDT'].leverage, 20);
+  assert.equal(account.positions['crypto:BTCUSDT'].margin, 300.09); // 6001.8 / 20
+});
+
+test('placeOrder uses the cfg slippageBps (v3 effective cfg)', () => {
+  const cfgSlip = { ...CFG, slippageBps: { ...CFG.slippageBps, crypto: 20 } };
+  const baseAccount = leveragedAccount();
+  const baseFill = placeOrder(baseAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 10 }, cryptoQuote(), { cfg: CFG, now: NOW_FRI });
+  const slippedAccount = leveragedAccount();
+  const slippedFill = placeOrder(slippedAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 10 }, cryptoQuote(), { cfg: cfgSlip, now: NOW_FRI });
+  assert.equal(baseFill.fill.price, 60018); // default 3bp
+  assert.equal(slippedFill.fill.price, 60120); // cfg 20bp
+  assert.ok(slippedFill.fill.price - baseFill.fill.price > 100);
+  // the cfg also changes the fee charged on the slipped notional
+  assert.equal(slippedFill.fill.fees, 6.01); // 0.1 * 60120 * 0.001 = 6.012
+});
+
+test('checkRisk uses cfg.margin.mmr for maintenance and liquidation (v3)', () => {
+  const quote = { 'crypto:BTCUSDT': cryptoQuote({ price: 55000 }) };
+  const lowAccount = leveragedAccount();
+  openCrypto10x(lowAccount);
+  const lowRisk = checkRisk(lowAccount, quote, RATES_ONE, { cfg: CFG, now: NOW_FRI });
+  assert.deepEqual(lowRisk.liquidations, []);
+  assert.ok(lowAccount.positions['crypto:BTCUSDT'], 'default mmr 0.5% keeps the position alive');
+
+  const cfgHighMmr = { ...CFG, margin: { ...CFG.margin, mmr: { ...CFG.margin.mmr, crypto: 0.05 } } };
+  const highAccount = leveragedAccount();
+  openCrypto10x(highAccount);
+  const highRisk = checkRisk(highAccount, quote, RATES_ONE, { cfg: cfgHighMmr, now: NOW_FRI });
+  assert.equal(highRisk.liquidations.length, 1);
+  assert.equal(highRisk.liquidations[0].reason, 'LIQUIDATION');
+  assert.equal(highAccount.positions['crypto:BTCUSDT'], undefined);
+});
+
+test('an open stores the cfg interestAnnual and accrueInterest uses it (v3)', () => {
+  const cfgRate = { ...CFG, margin: { ...CFG.margin, interestAnnual: { ...CFG.margin.interestAnnual, crypto: 0.2 } } };
+  const account = leveragedAccount();
+  const opened = placeOrder(account, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 10 }, cryptoQuote(), { cfg: cfgRate, now: NOW_FRI });
+  assert.equal(opened.error, null);
+  const position = account.positions['crypto:BTCUSDT'];
+  assert.equal(position.interestAnnual, 0.2); // from the injected cfg
+  assert.equal(position.debt, 5401.62);
+  const added = accrueInterest(account, NOW_24H);
+  const expected = position.debt * 0.2 / 8760 * 24;
+  assert.ok(Math.abs(added - expected) < 1e-6, `interest ${added} vs ${expected}`);
+  assert.ok(Math.abs(account.totalInterest - expected) < 1e-6);
+  assert.ok(Math.abs(position.accruedInterest - expected) < 1e-6);
+
+  // without the override the global 8% applies
+  const plain = leveragedAccount();
+  placeOrder(plain, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 10 }, cryptoQuote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(plain.positions['crypto:BTCUSDT'].interestAnnual, CFG.margin.interestAnnual.crypto);
+});
+
+test('portfolioView 5th cfg argument drives liqPrice/riskRatio (v3)', () => {
+  const account = leveragedAccount();
+  openCrypto10x(account);
+  const quotes = { 'crypto:BTCUSDT': cryptoQuote() };
+  const cfgHighMmr = { ...CFG, margin: { ...CFG.margin, mmr: { ...CFG.margin.mmr, crypto: 0.05 } } };
+  const low = portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG);
+  const high = portfolioView(account, quotes, RATES_ONE, NOW_FRI, cfgHighMmr);
+
+  const expectedLowLiq = (60018 * 0.1 - 600.18) / (0.1 * 0.995);
+  const expectedHighLiq = (60018 * 0.1 - 600.18) / (0.1 * 0.95);
+  assert.ok(Math.abs(low.positions[0].liqPrice - expectedLowLiq) < 0.02);
+  assert.ok(Math.abs(high.positions[0].liqPrice - expectedHighLiq) < 0.02);
+  assert.ok(high.positions[0].liqPrice > low.positions[0].liqPrice + 1000);
+  assert.equal(low.positions[0].riskRatio, 0.0501);
+  assert.equal(high.positions[0].riskRatio, 0.5014);
+  assert.equal(low.maintenanceMargin, 30);
+  assert.equal(high.maintenanceMargin, 300);
+  assert.equal(low.riskRatio, 0.0501);
+  assert.equal(high.riskRatio, 0.5014);
 });

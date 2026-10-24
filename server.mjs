@@ -53,6 +53,11 @@ function bootstrap(st, stStore) {
     ? st.watchlist
     : (CONFIG.defaults?.watchlist || []).slice();
   st.alerts = st.alerts || [];
+  // Normalise existing accounts (v3 settings may be missing on older state files).
+  for (const account of Object.values(st.accounts)) {
+    account.settings = mergeSettings(defaultAccountSettings(), account.settings || {});
+    if (!account.marginMode) account.marginMode = 'isolated';
+  }
   // Create the starter account only for a genuinely fresh state. The store's
   // normalizer drops unknown top-level flags, so rely on "no accounts yet".
   if (st.bootstrapped || Object.keys(st.accounts).length > 0) {
@@ -67,8 +72,137 @@ function bootstrap(st, stStore) {
     initialCapital: Number(CONFIG.defaults?.initialCapital) || 1000000,
     baseCurrency: CONFIG.defaults?.baseCurrency || 'CNY',
   });
+  account.settings = defaultAccountSettings();
   st.accounts[id] = account;
   stStore.save();
+}
+
+// ------------------------------------------------ account-level settings (v3)
+
+const SETTINGS_META = CONFIG.accountSettings || {};
+const SETTINGS_RANGES = SETTINGS_META.ranges || {};
+const LEVERAGE_CEILING = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125, ...(SETTINGS_META.leverageCeiling || {}) };
+const MARKETS = ['cn', 'hk', 'us', 'fx', 'crypto'];
+
+function cloneJson(value) {
+  return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function num(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function defaultAccountSettings() {
+  return {
+    leverageMultiplier: 1,
+    fees: cloneJson(CONFIG.fees || {}),
+    slippageBps: cloneJson(CONFIG.slippageBps || {}),
+    margin: cloneJson(CONFIG.margin || {}),
+    autoConvert: CONFIG.autoConvert !== false,
+    fxConvertSpread: num(CONFIG.fxConvertSpread, 0.003),
+  };
+}
+
+function mergeFees(base, patch) {
+  const out = cloneJson(base || {});
+  for (const [market, values] of Object.entries(patch || {})) {
+    if (!values || typeof values !== 'object') continue;
+    out[market] = { ...(out[market] || {}), ...values };
+  }
+  return out;
+}
+
+function mergeSettings(base, patch) {
+  const out = cloneJson(base);
+  if (!patch || typeof patch !== 'object') return out;
+  if (patch.leverageMultiplier !== undefined) out.leverageMultiplier = num(patch.leverageMultiplier, out.leverageMultiplier);
+  if (patch.fees) out.fees = mergeFees(out.fees, patch.fees);
+  if (patch.slippageBps) out.slippageBps = { ...out.slippageBps, ...patch.slippageBps };
+  if (patch.margin) {
+    out.margin = out.margin || {};
+    for (const key of ['mmr', 'interestAnnual', 'liquidationFeeRate']) {
+      if (patch.margin[key]) out.margin[key] = { ...(out.margin[key] || {}), ...patch.margin[key] };
+    }
+  }
+  if (patch.autoConvert !== undefined) out.autoConvert = patch.autoConvert !== false;
+  if (patch.fxConvertSpread !== undefined) out.fxConvertSpread = num(patch.fxConvertSpread, out.fxConvertSpread);
+  return out;
+}
+
+// Per-account leverage ceiling: base config leverage scaled by the account multiplier, clamped.
+function effectiveLeverage(settings) {
+  const multiplier = num(settings?.leverageMultiplier, 1);
+  const out = {};
+  for (const market of MARKETS) {
+    if (market === 'cn') {
+      out.cn = 1;
+      continue;
+    }
+    const base = num(CONFIG.leverage?.[market], 1);
+    const ceiling = num(LEVERAGE_CEILING[market], base);
+    out[market] = Math.min(ceiling, Math.max(1, Math.round(base * multiplier)));
+  }
+  return out;
+}
+
+function rangeCheck(errors, field, value, range) {
+  if (!Array.isArray(range) || range.length !== 2) return;
+  const [min, max] = range;
+  if (!Number.isFinite(value) || value < min || value > max) {
+    errors.push(`${field} 必须在 ${min} – ${max} 之间`);
+  }
+}
+
+function validateSettings(settings) {
+  const errors = [];
+  const ranges = SETTINGS_RANGES;
+  rangeCheck(errors, 'leverageMultiplier', num(settings.leverageMultiplier, NaN), ranges.leverageMultiplier);
+  const leverage = effectiveLeverage(settings);
+  for (const market of MARKETS) {
+    const mmr = num(settings?.margin?.mmr?.[market], NaN);
+    rangeCheck(errors, `margin.mmr.${market}`, mmr, ranges.margin?.mmr?.[market]);
+    if (market !== 'cn' && Number.isFinite(mmr) && mmr > 0.9 / leverage[market]) {
+      errors.push(`margin.mmr.${market} 不能高于 0.9 / 杠杆上限(${leverage[market]}x)`);
+    }
+    rangeCheck(errors, `slippageBps.${market}`, num(settings?.slippageBps?.[market], NaN), ranges.slippageBps);
+    rangeCheck(errors, `margin.interestAnnual.${market}`, num(settings?.margin?.interestAnnual?.[market], NaN), ranges.margin?.interestAnnual);
+    rangeCheck(errors, `margin.liquidationFeeRate.${market}`, num(settings?.margin?.liquidationFeeRate?.[market], NaN), ranges.margin?.liquidationFeeRate);
+    const fees = settings?.fees?.[market] || {};
+    for (const [key, range] of Object.entries(ranges.fees || {})) {
+      if (fees[key] === undefined) continue;
+      rangeCheck(errors, `fees.${market}.${key}`, num(fees[key], NaN), range);
+    }
+  }
+  rangeCheck(errors, 'fxConvertSpread', num(settings.fxConvertSpread, NaN), ranges.fxConvertSpread);
+  if (typeof settings.autoConvert !== 'boolean') errors.push('autoConvert 必须是布尔值');
+  return errors;
+}
+
+function effectiveCfg(account) {
+  const settings = mergeSettings(defaultAccountSettings(), account?.settings || {});
+  return {
+    ...CONFIG,
+    leverage: effectiveLeverage(settings),
+    fees: settings.fees,
+    slippageBps: settings.slippageBps,
+    margin: settings.margin,
+    autoConvert: settings.autoConvert !== false,
+    fxConvertSpread: num(settings.fxConvertSpread, 0.003),
+  };
+}
+
+function settingsLocked(account) {
+  const hasPosition = Object.values(account?.positions || {}).some((pos) => Number(pos?.qty) > 0);
+  const hasOpenOrder = (account?.orders || []).some((order) => order.status === 'open');
+  return hasPosition || hasOpenOrder;
+}
+
+function riskSettingsKey(settings) {
+  return JSON.stringify({
+    leverageMultiplier: num(settings.leverageMultiplier, 1),
+    margin: settings.margin || {},
+  });
 }
 
 function nowIso() {
@@ -260,10 +394,11 @@ async function runTick(reason = 'interval') {
     const now = nowIso();
     const snapshotDue = Date.now() - lastSnapshotAt >= (CONFIG.refresh?.equitySnapshotMs || 60_000);
     for (const account of accounts) {
+      const cfg = effectiveCfg(account);
       const prevDay = account.dayKey;
       let preTickEquity = null;
       try {
-        const preView = engine.portfolioView(account, quotesBySymbol, fxRates, now);
+        const preView = engine.portfolioView(account, quotesBySymbol, fxRates, now, cfg);
         preTickEquity = Number(preView?.equity?.total);
       } catch {
         preTickEquity = null;
@@ -279,13 +414,13 @@ async function runTick(reason = 'interval') {
         console.warn('[tick] accrueInterest failed:', err?.message || err);
       }
       try {
-        engine.tickAccount(account, freshQuotesForMatching(quotesBySymbol), { cfg: CFG, now, fxRates });
+        engine.tickAccount(account, freshQuotesForMatching(quotesBySymbol), { cfg, now, fxRates });
       } catch (err) {
         console.warn('[tick] tickAccount failed:', err?.message || err);
       }
       try {
         if (typeof engine.checkRisk === 'function') {
-          const risk = engine.checkRisk(account, freshQuotesForMatching(quotesBySymbol), fxRates, { cfg: CFG, now });
+          const risk = engine.checkRisk(account, freshQuotesForMatching(quotesBySymbol), fxRates, { cfg, now });
           if (risk?.liquidations?.length) {
             for (const item of risk.liquidations) {
               console.log(`[risk] ${account.id} 强平 ${item.symbol} ${item.side || ''} qty=${item.qty} @${item.price}`);
@@ -306,7 +441,7 @@ async function runTick(reason = 'interval') {
       }
       if (snapshotDue) {
         try {
-          const view = engine.portfolioView(account, quotesBySymbol, fxRates, now);
+          const view = engine.portfolioView(account, quotesBySymbol, fxRates, now, cfg);
           const equity = Number(view?.equity?.total);
           if (Number.isFinite(equity)) {
             account.equityHistory = account.equityHistory || [];
@@ -586,12 +721,44 @@ route('GET', /^\/api\/accounts$/, async (_req, res) => {
   sendJson(res, 200, { accounts: store.listAccounts() });
 });
 
+route('GET', /^\/api\/settings\/meta$/, async (_req, res) => {
+  const metaMarkets = (await marketdata.getMarkets()) || [];
+  const markets = metaMarkets.map((market) => ({
+    id: market.id,
+    name: market.name,
+    currency: market.currency,
+    baseLeverage: num(CONFIG.leverage?.[market.id], 1),
+    maxLeverageCeiling: num(LEVERAGE_CEILING[market.id], num(CONFIG.leverage?.[market.id], 1)),
+    shortable: market.id !== 'cn',
+  }));
+  sendJson(res, 200, {
+    markets,
+    ranges: SETTINGS_RANGES,
+    presets: SETTINGS_META.presets || {},
+    multiplier: {
+      range: SETTINGS_RANGES.leverageMultiplier || [0.1, 2],
+      default: 1,
+      quick: [0.1, 0.25, 0.5, 1, 2],
+    },
+    defaults: {
+      settings: defaultAccountSettings(),
+      initialCapital: num(CONFIG.defaults?.initialCapital, 1_000_000),
+      baseCurrency: CONFIG.defaults?.baseCurrency || 'CNY',
+    },
+  });
+});
+
 route('POST', /^\/api\/accounts$/, async (req, res) => {
   const body = await readJsonBody(req);
   const name = String(body.name || '').trim() || `账户 ${Object.keys(state.accounts).length + 1}`;
   const initialCapital = Number(body.initialCapital);
-  if (!Number.isFinite(initialCapital) || initialCapital <= 0) {
-    throw httpError(400, 'CAPITAL_INVALID', '初始资金必须是大于 0 的数字');
+  if (!Number.isFinite(initialCapital) || initialCapital < 1000 || initialCapital > 1_000_000_000) {
+    throw httpError(400, 'CAPITAL_INVALID', '初始资金需在 1,000 – 1,000,000,000 之间');
+  }
+  const settings = mergeSettings(defaultAccountSettings(), body.settings || {});
+  const settingsErrors = validateSettings(settings);
+  if (settingsErrors.length) {
+    throw httpError(400, 'SETTINGS_INVALID', settingsErrors.slice(0, 6).join('；'));
   }
   const id = store.nextId('acc');
   const account = engine.createAccount({
@@ -600,10 +767,11 @@ route('POST', /^\/api\/accounts$/, async (req, res) => {
     initialCapital,
     baseCurrency: String(body.baseCurrency || 'CNY'),
   });
+  account.settings = settings;
   if (String(body.marginMode) === 'cross') account.marginMode = 'cross';
   store.addAccount(account);
   store.save();
-  sendJson(res, 201, { account });
+  sendJson(res, 201, { account, settings });
 });
 
 route('DELETE', /^\/api\/accounts\/([^/]+)$/, async (_req, res, url) => {
@@ -629,9 +797,35 @@ route('POST', /^\/api\/accounts\/([^/]+)\/reset$/, async (req, res, url) => {
     baseCurrency: account.baseCurrency,
   });
   rebuilt.marginMode = account.marginMode || 'isolated';
+  rebuilt.settings = mergeSettings(defaultAccountSettings(), account.settings || {});
   store.replaceAccount(rebuilt);
   store.save();
   sendJson(res, 200, { account: rebuilt });
+});
+
+route('PATCH', /^\/api\/accounts\/([^/]+)\/settings$/, async (req, res, url) => {
+  const id = decodeURIComponent(url.pathname.split('/')[3]);
+  const account = getAccountOr404(id);
+  const body = await readJsonBody(req);
+  const before = mergeSettings(defaultAccountSettings(), account.settings || {});
+  const after = mergeSettings(before, body.settings || {});
+  const errors = validateSettings(after);
+  if (errors.length) throw httpError(400, 'SETTINGS_INVALID', errors.slice(0, 6).join('；'));
+  if (settingsLocked(account) && riskSettingsKey(before) !== riskSettingsKey(after)) {
+    throw httpError(409, 'SETTINGS_LOCKED', '有持仓或未成交委托时不能修改杠杆上限倍率与保证金参数');
+  }
+  account.settings = after;
+  store.save();
+  sendJson(res, 200, {
+    account,
+    settings: after,
+    effective: {
+      leverage: effectiveCfg(account).leverage,
+      fees: after.fees,
+      slippageBps: after.slippageBps,
+      margin: after.margin,
+    },
+  });
 });
 
 route('GET', /^\/api\/accounts\/([^/]+)\/stats$/, async (_req, res, url) => {
@@ -832,6 +1026,7 @@ route('POST', /^\/api\/accounts\/([^/]+)\/orders$/, async (req, res, url) => {
   }
 
   const now = nowIso();
+  const cfg = effectiveCfg(account);
   engine.rollDay(account, now);
   if (typeof engine.accrueInterest === 'function') engine.accrueInterest(account, now);
   // A market order must fill at a live price; stale quotes mean the exchange is
@@ -842,7 +1037,7 @@ route('POST', /^\/api\/accounts\/([^/]+)\/orders$/, async (req, res, url) => {
   const result = engine.placeOrder(account, {
     symbol, side, type, qty, limitPrice, leverage: leverageRaw, close, takeProfit, stopLoss,
   }, quote, {
-    cfg: CFG,
+    cfg,
     now,
     fxRates: rates || undefined,
   });
@@ -873,9 +1068,10 @@ route('GET', /^\/api\/accounts\/([^/]+)$/, async (_req, res, url) => {
     if (rates && typeof rates === 'object') fxRates = rates;
   }
   const now = nowIso();
+  const cfg = effectiveCfg(account);
   engine.rollDay(account, now);
   if (typeof engine.accrueInterest === 'function') engine.accrueInterest(account, now);
-  const view = engine.portfolioView(account, quotesBySymbol, fxRates, now);
+  const view = engine.portfolioView(account, quotesBySymbol, fxRates, now, cfg);
   sendJson(res, 200, {
     account: {
       id: account.id,
@@ -884,13 +1080,24 @@ route('GET', /^\/api\/accounts\/([^/]+)$/, async (_req, res, url) => {
       initialCapital: account.initialCapital,
       createdAt: account.createdAt,
       marginMode: account.marginMode || 'isolated',
+      settings: account.settings,
     },
     ...view,
     liquidations: view.liquidations || account.liquidations || [],
     totalInterest: view.totalInterest ?? account.totalInterest ?? 0,
     buyingPower: computeBuyingPower(view, fxRates, account.baseCurrency),
-    autoConvert: CONFIG.autoConvert !== false,
-    fxConvertSpread: Number(CONFIG.fxConvertSpread) || 0,
+    autoConvert: cfg.autoConvert !== false,
+    fxConvertSpread: Number(cfg.fxConvertSpread) || 0,
+    settings: account.settings,
+    effective: {
+      leverage: cfg.leverage,
+      fees: cfg.fees,
+      slippageBps: cfg.slippageBps,
+      margin: cfg.margin,
+      autoConvert: cfg.autoConvert !== false,
+      fxConvertSpread: Number(cfg.fxConvertSpread) || 0,
+    },
+    settingsLocked: settingsLocked(account),
     fxRates,
   });
 });

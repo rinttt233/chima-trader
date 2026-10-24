@@ -8,7 +8,12 @@
     "enabled": true,
     "host": "127.0.0.1",
     "port": 65532,
-    "hosts": ["api.binance.com", "api.coingecko.com", "query1.finance.yahoo.com", "query2.finance.yahoo.com"]
+    "hosts": [
+      "api.binance.com",
+      "api.coingecko.com",
+      "query1.finance.yahoo.com",
+      "query2.finance.yahoo.com"
+    ]
   },
   "defaults": {
     "initialCapital": 1000000,
@@ -83,17 +88,17 @@
   },
   "leverage": {
     "cn": 1,
-    "hk": 4,
-    "us": 4,
-    "fx": 100,
-    "crypto": 20
+    "hk": 10,
+    "us": 10,
+    "fx": 200,
+    "crypto": 100
   },
   "margin": {
     "mmr": {
       "cn": 1,
-      "hk": 0.125,
-      "us": 0.125,
-      "fx": 0.005,
+      "hk": 0.05,
+      "us": 0.05,
+      "fx": 0.0025,
       "crypto": 0.005
     },
     "interestAnnual": {
@@ -113,17 +118,168 @@
   },
   "autoConvert": true,
   "fxConvertSpread": 0.003,
+  "accountSettings": {
+    "ranges": {
+      "initialCapital": [
+        1000,
+        1000000000
+      ],
+      "leverageMultiplier": [
+        0.1,
+        2
+      ],
+      "fees": {
+        "commissionRate": [
+          0,
+          0.005
+        ],
+        "commissionMin": [
+          0,
+          500
+        ],
+        "stampDutyRate": [
+          0,
+          0.005
+        ],
+        "transferFeeRate": [
+          0,
+          0.001
+        ],
+        "exchangeFeeRate": [
+          0,
+          0.001
+        ],
+        "settlementFeeRate": [
+          0,
+          0.001
+        ],
+        "perShare": [
+          0,
+          0.1
+        ],
+        "secFeeRate": [
+          0,
+          0.001
+        ],
+        "spreadBps": [
+          0,
+          100
+        ]
+      },
+      "slippageBps": [
+        0,
+        200
+      ],
+      "margin": {
+        "mmr": {
+          "hk": [
+            0.005,
+            0.5
+          ],
+          "us": [
+            0.005,
+            0.5
+          ],
+          "fx": [
+            0.0005,
+            0.1
+          ],
+          "crypto": [
+            0.0005,
+            0.1
+          ]
+        },
+        "interestAnnual": [
+          0,
+          0.5
+        ],
+        "liquidationFeeRate": [
+          0,
+          0.05
+        ]
+      },
+      "fxConvertSpread": [
+        0,
+        0.02
+      ]
+    },
+    "leverageCeiling": {
+      "cn": 1,
+      "hk": 20,
+      "us": 20,
+      "fx": 500,
+      "crypto": 125
+    },
+    "presets": {
+      "conservative": {
+        "leverageMultiplier": 0.1,
+        "margin": {
+          "mmr": {
+            "cn": 1,
+            "hk": 0.1,
+            "us": 0.1,
+            "fx": 0.005,
+            "crypto": 0.01
+          }
+        }
+      },
+      "recommended": {
+        "leverageMultiplier": 1,
+        "margin": {
+          "mmr": {
+            "cn": 1,
+            "hk": 0.05,
+            "us": 0.05,
+            "fx": 0.0025,
+            "crypto": 0.005
+          }
+        }
+      },
+      "aggressive": {
+        "leverageMultiplier": 2,
+        "margin": {
+          "mmr": {
+            "cn": 1,
+            "hk": 0.04,
+            "us": 0.04,
+            "fx": 0.002,
+            "crypto": 0.004
+          }
+        }
+      }
+    }
+  },
   "sessions": {
     "cn": [
-      { "start": "09:30", "end": "11:30", "tz": "Asia/Shanghai" },
-      { "start": "13:00", "end": "15:00", "tz": "Asia/Shanghai" }
+      {
+        "start": "09:30",
+        "end": "11:30",
+        "tz": "Asia/Shanghai"
+      },
+      {
+        "start": "13:00",
+        "end": "15:00",
+        "tz": "Asia/Shanghai"
+      }
     ],
     "hk": [
-      { "start": "09:30", "end": "12:00", "tz": "Asia/Hong_Kong" },
-      { "start": "13:00", "end": "16:00", "tz": "Asia/Hong_Kong" }
+      {
+        "start": "09:30",
+        "end": "12:00",
+        "tz": "Asia/Hong_Kong"
+      },
+      {
+        "start": "13:00",
+        "end": "16:00",
+        "tz": "Asia/Hong_Kong"
+      }
     ],
     "us": [
-      { "start": "09:30", "end": "16:00", "tz": "America/New_York" }
+      {
+        "start": "09:30",
+        "end": "16:00",
+        "tz": "America/New_York"
+      }
     ]
   }
 }
