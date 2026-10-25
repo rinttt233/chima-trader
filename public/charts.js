@@ -295,8 +295,8 @@
       }
 
       chart.timeScale().fitContent();
-      if (bars.length > 180) {
-        chart.timeScale().setVisibleLogicalRange({ from: bars.length - 150, to: bars.length + 2 });
+      if (barData.length > 180) {
+        chart.timeScale().setVisibleLogicalRange({ from: barData.length - 150, to: barData.length + 2 });
       }
     }
 
@@ -313,28 +313,57 @@
       }
     }
 
-    function updateAllMAValues() {
-      if (mode !== 'candles') return;
-      for (var i = 0; i < maSeries.length; i++) {
-        var values = computeMA(barData, maSeries[i].period);
-        if (values.length) maSeries[i].series.setData(values);
+    // The chart can be left open across sessions/holidays. When the newest live
+    // quote is far beyond the last stored bar we must refetch instead of
+    // fabricating bars, otherwise the axis gets a huge empty gap.
+    var reloadAskedAt = 0;
+    function askReload(reason) {
+      var now = Date.now();
+      if (now - reloadAskedAt < 30000) return;
+      reloadAskedAt = now;
+      if (typeof opts.onNeedReload === 'function') {
+        try { opts.onNeedReload(reason); } catch (e) { /* noop */ }
       }
     }
 
-    // Streaming update: only touch the last candle/point (or append a new
-    // intraday bar when the interval rolls over), never re-render the chart.
+    // Streaming update: only touch the last candle/point (or append one new bar
+    // when the quote's own timestamp rolls over), never re-render the chart.
+    // Uses the QUOTE timestamp, never the local wall clock: a closed market must
+    // not append fake bars while the page sits there with stale quotes.
     function updateQuote(quote) {
-      if (disposed || !quote || !isFinite(quote.price) || !barData.length) return;
+      if (disposed || !quote || !barData.length) return;
+      if (quote.stale === true) return;
       var price = Number(quote.price);
+      if (!isFinite(price)) return;
+      var quoteMs = Date.parse(quote.ts);
+      if (!isFinite(quoteMs)) return;
+      var now = Date.now();
+      var intervalMs = currentIntervalMs;
+      var intraday = intervalMs < INTRADAY_MAX_MS;
+      // Ignore quotes that are older than the chart's interval allows (market
+      // closed / vendor cache); they must not paint the chart.
+      if (now - quoteMs > Math.max(3 * intervalMs, 5 * 60 * 1000)) return;
+      var quoteSec = Math.floor(quoteMs / 1000) + BEIJING_OFFSET_SEC;
+
       var last = barData[barData.length - 1];
       var lastTime = toChartTime(last.t);
       if (lastTime == null) return;
 
-      if (currentIntervalMs < INTRADAY_MAX_MS) {
-        var stepSec = Math.max(1, Math.round(currentIntervalMs / 1000));
-        var shiftedNow = Math.floor(Date.now() / 1000) + BEIJING_OFFSET_SEC;
-        var bucket = Math.floor(shiftedNow / stepSec) * stepSec;
+      var stepSec = null;
+      if (intraday) {
+        stepSec = Math.max(1, Math.round(intervalMs / 1000));
+      } else if (currentInterval === '1d') {
+        stepSec = 86400;
+      }
+
+      if (stepSec != null) {
+        var bucket = Math.floor(quoteSec / stepSec) * stepSec;
+        if (bucket < lastTime) return; // out-of-order quote: never rewrite history
         if (bucket > lastTime) {
+          if (bucket - lastTime > stepSec * 2) {
+            askReload('gap'); // weekend / holiday / resumed session
+            return;
+          }
           var iso = new Date((bucket - BEIJING_OFFSET_SEC) * 1000).toISOString();
           var appended = { t: iso, o: price, h: price, l: price, c: price, v: 0 };
           barData.push(appended);
@@ -344,7 +373,7 @@
           } else if (mode === 'line' && lineSeries) {
             lineSeries.update({ time: bucket, value: price });
           }
-          updateAllMAValues();
+          if (candleSeries) updateMALastValue();
           return;
         }
       }
@@ -368,7 +397,20 @@
       try { chart.remove(); } catch (e) { /* noop */ }
     }
 
-    return { setData: setData, updateQuote: updateQuote, destroy: destroy, chart: chart, resize: function () { chart.applyOptions({}); } };
+    var handle = {
+      setData: setData,
+      updateQuote: updateQuote,
+      destroy: destroy,
+      chart: chart,
+      resize: function () { chart.applyOptions({}); },
+      lastBarTime: function () { return barData.length ? barData[barData.length - 1].t : null; },
+      barCount: function () { return barData.length; }
+    };
+    if (typeof window !== 'undefined') {
+      window.__charts = window.__charts || [];
+      window.__charts.push(handle);
+    }
+    return handle;
   }
 
   // ------------------------------------------------------------ equity chart
@@ -447,7 +489,12 @@
       try { chart.remove(); } catch (e) { /* noop */ }
     }
 
-    return { setData: setData, destroy: destroy, chart: chart };
+    var handle = { setData: setData, destroy: destroy, chart: chart };
+    if (typeof window !== 'undefined') {
+      window.__charts = window.__charts || [];
+      window.__charts.push(handle);
+    }
+    return handle;
   }
 
   var INTERVAL_MS = {

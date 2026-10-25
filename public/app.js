@@ -139,6 +139,7 @@
     chartToken: 0,
     chart: null,
     chartLastPrice: null,
+    chartReloading: false,
     equityChart: null,
     equity: null,
     equityRange: '1m',
@@ -3500,7 +3501,16 @@
     if (state.chart || !window.Charts) return;
     var container = $('#price-chart');
     if (!container) return;
-    state.chart = window.Charts.createPriceChart(container, { onCrosshair: onChartCrosshair });
+    state.chart = window.Charts.createPriceChart(container, {
+      onCrosshair: onChartCrosshair,
+      onNeedReload: function () {
+        // Gap between the last stored bar and the live quote (weekend/holiday/
+        // resumed session): refetch instead of drawing fake bars.
+        if (state.chartReloading) return;
+        state.chartReloading = true;
+        loadChart().catch(function () { /* noop */ }).then(function () { state.chartReloading = false; });
+      }
+    });
   }
 
   function sourceUnavailableText(message) {
