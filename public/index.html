@@ -63,7 +63,7 @@
 
 <div class="margin-strip" id="margin-strip" hidden>
   <button type="button" class="margin-mode-badge" id="margin-mode-badge" title="点击切换保证金模式">逐仓</button>
-  <button type="button" class="multiplier-badge" id="account-multiplier-badge" title="账户杠杆上限倍率，点击打开账户设置">倍率 ×1</button>
+  <button type="button" class="multiplier-badge" id="account-multiplier-badge" title="账户杠杆上限，点击打开账户设置">杠杆上限</button>
   <span class="ms-item ms-caps" id="account-leverage-caps">--</span>
   <span class="ms-item">保证金占用 <b class="num" id="margin-used">--</b></span>
   <span class="ms-item">可用保证金 <b class="num" id="margin-available">--</b></span>
@@ -126,6 +126,7 @@
           <span><i class="dot-ma20"></i>MA20</span>
         </div>
         <div class="seg-group interval-group" id="interval-group" role="group" aria-label="K线周期"></div>
+        <button type="button" class="link-btn fx-pair-entry" id="btn-custom-fx" hidden>自定义货币对</button>
         <button type="button" class="icon-btn" id="btn-chart-refresh" title="刷新图表">⟳</button>
       </div>
     </div>
@@ -443,18 +444,8 @@
         <div class="settings-lock" id="settings-lock-note" hidden></div>
         <div class="settings-presets" id="settings-presets" aria-label="参数预设"></div>
 
-        <div class="settings-multiplier">
-          <div class="settings-mult-head">
-            <span class="settings-mult-label">杠杆上限倍率</span>
-            <b class="settings-mult-value" id="settings-mult-value">×1</b>
-            <span class="settings-mult-range" id="settings-mult-range-label">0.1× – 2×</span>
-          </div>
-          <input type="range" id="settings-mult-range" min="0.1" max="2" step="0.05" value="1" aria-label="杠杆上限倍率">
-          <div class="settings-quick" id="settings-mult-quick"></div>
-          <div class="settings-preview" id="settings-mult-preview"></div>
-          <p class="settings-note" id="settings-mult-note"></p>
-          <p class="settings-note settings-clamp-note" id="settings-mmr-clamp-note" hidden></p>
-        </div>
+        <div class="settings-caps" id="settings-caps"></div>
+        <p class="settings-note settings-clamp-note" id="settings-mmr-clamp-note" hidden></p>
       </div>
 
       <div id="account-settings-fields"></div>
@@ -655,6 +646,35 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="modal-fx-pair" hidden>
+  <div class="modal modal-fx-pair" role="dialog" aria-modal="true" aria-labelledby="fx-pair-title">
+    <div class="modal-head">
+      <h2 id="fx-pair-title">自定义货币对</h2>
+      <button type="button" class="icon-btn" data-close-modal="modal-fx-pair" aria-label="关闭">×</button>
+    </div>
+    <div class="modal-body">
+      <p class="modal-hint">选择任意两个不同币种，生成 <code>fx:&lt;基础&gt;&lt;计价&gt;</code> 货币对；可与普通外汇标的一样看 K 线、加自选和交易。</p>
+      <div class="fx-pair-grid">
+        <label class="form-row">
+          <span class="form-label">基础货币</span>
+          <div class="input-wrap"><select id="fx-base-select"></select></div>
+        </label>
+        <button type="button" class="btn btn-ghost fx-swap-btn" id="fx-swap" title="交换基础/计价货币">⇄</button>
+        <label class="form-row">
+          <span class="form-label">计价货币</span>
+          <div class="input-wrap"><select id="fx-quote-select"></select></div>
+        </label>
+      </div>
+      <p class="settings-note" id="fx-pair-preview">--</p>
+      <div class="form-error" id="fx-pair-error" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button type="button" class="btn" data-close-modal="modal-fx-pair">取消</button>
+      <button type="button" class="btn btn-primary" id="btn-fx-generate">生成并交易</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop" id="modal-sources" hidden>
   <div class="modal modal-wide modal-sources" role="dialog" aria-modal="true" aria-labelledby="sources-title">
     <div class="modal-head">
@@ -693,10 +713,11 @@
       </ol>
       <h3 class="help-section-title">账户参数（右上角「账户设置」）</h3>
       <ul class="help-notes">
-        <li><b>杠杆上限倍率</b>：按市场基准杠杆换算账户可用上限；0.1× 保守、1× 推荐（加密 100x / 外汇 200x / 港美 10x）、2× 激进（加密 125x / 外汇 400x / 港美 20x，按系统上限截断），A股恒 1x。</li>
+        <li><b>杠杆上限</b>：股票（港/美股）1–20x、加密货币 1–500x、外汇 1–1000x 三个独立上限；A股固定 1x。上限越高，保证金占用越少但越接近强平线。</li>
+        <li><b>任意货币对</b>：外汇市场点「自定义货币对」，可选 USD/EUR/GBP/JPY/AUD/CAD/CHF/NZD/CNY/HKD 中任意两个不同币种组成货币对，生成后可直接看 K 线、加自选和交易。</li>
         <li><b>费率与滑点</b>：手续费、最低佣金、印花税、SEC 费等按账户生效，滑点 bps 影响市价成交估算；只影响之后的成交，可随时修改。</li>
-        <li><b>保证金参数</b>：维持保证金率越低越晚强平但风险更高；借币年化利率逐小时计息；强平费率在强制平仓时收取。有持仓或挂单时这些风险参数会锁定。</li>
-        <li>推荐保持默认值；提高倍率或降低 mmr 会放大风险，请自行控制仓位。</li>
+        <li><b>保证金参数</b>：维持保证金率越低越晚强平但风险更高；借币年化利率逐小时计息；强平费率在强制平仓时收取。有持仓或挂单时杠杆上限和这些风险参数会锁定。</li>
+        <li>推荐保持默认值；提高杠杆上限或降低 mmr 会放大风险，请自行控制仓位。</li>
       </ul>
       <h3 class="help-section-title">数据源异常怎么办</h3>
       <ul class="help-notes">

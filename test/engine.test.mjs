@@ -38,6 +38,12 @@ const NOW_SAT = '2026-10-24T10:00:00+08:00'; // Saturday, cn closed
 const NOW_US_THU = '2026-10-22T14:00:00Z'; // Thursday 10:00 America/New_York
 
 const round2 = (value) => Math.round(Number(value) * 100) / 100;
+const roundToPrice = (value, decimals) => {
+  const factor = 10 ** decimals;
+  const scaled = Number((Math.abs(Number(value)) * factor).toPrecision(12));
+  const rounded = Math.round(scaled) / factor;
+  return Number(value) < 0 ? -rounded : rounded;
+};
 
 function makeQuote(overrides = {}) {
   return {
@@ -932,6 +938,8 @@ test('equitySeries filters equityHistory by range and now', () => {
 
 const NOW_12H = '2026-10-23T22:00:00+08:00'; // 12h after NOW_FRI
 const NOW_24H = '2026-10-24T10:00:00+08:00'; // 24h after NOW_FRI
+// Derive risk expectations from the live config so mmr tuning does not rewrite tests.
+const CRYPTO_MMR = CFG.margin.mmr.crypto;
 
 test('createAccount seeds the v2 margin fields and honours marginMode', () => {
   const account = makeAccount();
@@ -964,18 +972,20 @@ test('crypto 10x long opens with margin/debt and exposes a liquidation price', (
   const view = portfolioView(account, { 'crypto:BTCUSDT': cryptoQuote() }, RATES_ONE, NOW_FRI, CFG);
   assert.equal(view.equity.total, 99992.2); // cash + margin - slippage loss
   assert.equal(view.marginUsed, 600.18);
-  assert.equal(view.maintenanceMargin, 30); // 0.1 * 60000 * 0.005
+  const expectedMaintenance = round2(0.1 * 60000 * CRYPTO_MMR);
+  const expectedPosEquity = 600.18 - 1.8;
+  assert.equal(view.maintenanceMargin, expectedMaintenance);
   assert.equal(view.marginAvailable, 99392.02);
-  assert.equal(view.riskRatio, 0.0501); // 30 / 598.38
+  assert.ok(Math.abs(view.riskRatio - (0.1 * 60000 * CRYPTO_MMR) / expectedPosEquity) < 1e-3);
   const positionView = view.positions[0];
   assert.equal(positionView.side, 'long');
   assert.equal(positionView.leverage, 10);
   assert.equal(positionView.margin, 600.18);
-  assert.equal(positionView.maintenanceMargin, 30);
-  assert.equal(positionView.riskRatio, 0.0501);
+  assert.equal(positionView.maintenanceMargin, expectedMaintenance);
+  assert.ok(Math.abs(positionView.riskRatio - (0.1 * 60000 * CRYPTO_MMR) / expectedPosEquity) < 1e-3);
   assert.equal(positionView.unrealizedPnl, -1.8);
   // liqPrice = (avgCost*qty - margin) / (qty*(1-mmr))
-  const expectedLiq = (60018 * 0.1 - 600.18) / (0.1 * 0.995);
+  const expectedLiq = (60018 * 0.1 - 600.18) / (0.1 * (1 - CRYPTO_MMR));
   assert.ok(Math.abs(positionView.liqPrice - expectedLiq) < 0.02, `liqPrice ${positionView.liqPrice} vs ${expectedLiq}`);
   assert.equal(view.totalInterest, 0);
   assert.deepEqual(view.liquidations, []);
@@ -998,7 +1008,7 @@ test('crypto 10x short opens a short position with borrowed debt', () => {
   assert.equal(positionView.unrealizedPnl, -1.8); // (59982 - 60000) * 0.1
   // opened today, so todayPnl uses the entry price (equals the unrealised PnL)
   assert.equal(positionView.todayPnl, -1.8);
-  const expectedLiq = (59982 * 0.1 + 599.82) / (0.1 * 1.005);
+  const expectedLiq = (59982 * 0.1 + 599.82) / (0.1 * (1 + CRYPTO_MMR));
   assert.ok(Math.abs(positionView.liqPrice - expectedLiq) < 0.02);
 });
 
@@ -1023,38 +1033,47 @@ test('isolated margin call liquidates a position below its liquidation price', (
   const account = leveragedAccount();
   openCrypto10x(account);
 
-  const risk = checkRisk(account, { 'crypto:BTCUSDT': cryptoQuote({ price: 54200 }) }, RATES_ONE, { cfg: CFG, now: NOW_FRI });
+  // 54000 is below the isolated liquidation price (~54070 with the current 0.1% mmr).
+  const crashPrice = 54000;
+  const risk = checkRisk(account, { 'crypto:BTCUSDT': cryptoQuote({ price: crashPrice }) }, RATES_ONE, { cfg: CFG, now: NOW_FRI });
+  const execPrice = round2(crashPrice * (1 - 3 / 10000)); // market fill: 3bp slippage
+  const gross = (execPrice - 60018) * 0.1;
+  const takerFee = round2(execPrice * 0.1 * 0.001);
+  const liquidationFee = round2(execPrice * 0.1 * 0.005);
+  const expectedPnl = round2(gross - takerFee - liquidationFee);
+  const expectedCash = round2(99393.82 + 600.18 + gross - takerFee - liquidationFee);
+
   assert.equal(risk.liquidations.length, 1);
   assert.equal(risk.liquidations[0].reason, 'LIQUIDATION');
   assert.equal(risk.liquidations[0].symbol, 'crypto:BTCUSDT');
-  assert.equal(risk.liquidations[0].price, 54183.74); // 54200 * (1 - 3bp) slippage
-  assert.equal(risk.liquidations[0].pnl, -615.94); // closes at a loss incl. fees + liquidation fee
+  assert.equal(risk.liquidations[0].price, execPrice);
+  assert.equal(risk.liquidations[0].pnl, expectedPnl); // loss incl. fees + liquidation fee
   assert.equal(account.positions['crypto:BTCUSDT'], undefined);
-  assert.equal(account.cash.USDT, 99378.06);
+  assert.equal(account.cash.USDT, expectedCash);
   assert.equal(account.liquidations.length, 1);
   assert.equal(account.liquidations[0].reason, 'LIQUIDATION');
   const liquidationTrade = account.trades.at(-1);
   assert.equal(liquidationTrade.reason, 'LIQUIDATION');
-  assert.equal(liquidationTrade.realizedPnl, -615.94);
+  assert.equal(liquidationTrade.realizedPnl, expectedPnl);
   // the forced exit is also recorded as an order with reason LIQUIDATION
   assert.equal(account.orders.at(-1).reason, 'LIQUIDATION');
   assert.equal(account.orders.at(-1).status, 'filled');
-  assert.equal(portfolioView(account, {}, RATES_ONE, NOW_FRI, CFG).equity.total, 99378.06);
+  assert.equal(portfolioView(account, {}, RATES_ONE, NOW_FRI, CFG).equity.total, expectedCash);
 });
 
 test('risk warning fires above 0.8 without liquidating', () => {
   const account = leveragedAccount();
   openCrypto10x(account);
-  const risk = checkRisk(account, { 'crypto:BTCUSDT': cryptoQuote({ price: 54300 }) }, RATES_ONE, { cfg: CFG, now: NOW_FRI });
+  const liqPrice = portfolioView(account, { 'crypto:BTCUSDT': cryptoQuote() }, RATES_ONE, NOW_FRI, CFG).positions[0].liqPrice;
+  const warningPrice = Math.ceil(liqPrice) + 5; // just above the liquidation price
+  const risk = checkRisk(account, { 'crypto:BTCUSDT': cryptoQuote({ price: warningPrice }) }, RATES_ONE, { cfg: CFG, now: NOW_FRI });
   assert.deepEqual(risk.liquidations, []);
   assert.equal(risk.warnings.length, 1);
   assert.equal(risk.warnings[0].code, 'RISK_HIGH');
   assert.equal(risk.warnings[0].symbol, 'crypto:BTCUSDT');
-  assert.ok(risk.warnings[0].riskRatio > 0.8);
+  assert.ok(risk.warnings[0].riskRatio > 0.8 && risk.warnings[0].riskRatio <= 1);
   assert.match(risk.warnings[0].message, /接近强平/);
   assert.ok(account.positions['crypto:BTCUSDT'], 'position must survive a warning');
-  // 27.15 / 28.38 = 0.9566...
-  assert.equal(risk.warnings[0].riskRatio, 0.9567);
 });
 
 test('cross margin liquidates the biggest loser first until equity covers maintenance', () => {
@@ -1089,13 +1108,15 @@ test('cross margin warns when the account risk ratio is high', () => {
     accruedInterest: 0, interestAnnual: 0, lastInterestAt: NOW_FRI, takeProfit: null, stopLoss: null,
     openedAt: NOW_FRI, todayBuyQty: 0, todayBuyDate: null
   };
-  const risk = checkRisk(account, { 'crypto:BTCUSDT': cryptoQuote({ price: 44250 }) }, RATES_ONE, { cfg: CFG, now: NOW_FRI });
+  // equity = cash 10000 + margin 6000 + (P - 60000) = P - 44000
+  // pick P so that equity is just above maintenance and riskRatio ≈ 0.9
+  const warningPrice = round2(44000 + (44000 * CRYPTO_MMR) / (0.9 - CRYPTO_MMR));
+  const risk = checkRisk(account, { 'crypto:BTCUSDT': cryptoQuote({ price: warningPrice }) }, RATES_ONE, { cfg: CFG, now: NOW_FRI });
   assert.deepEqual(risk.liquidations, []);
   assert.equal(risk.warnings.length, 1);
   assert.equal(risk.warnings[0].code, 'RISK_HIGH');
   assert.equal(risk.warnings[0].symbol, null); // account level
-  // equity = 10000 + 6000 - 15750 = 250, maintenance = 221.25 -> 0.885
-  assert.equal(risk.warnings[0].riskRatio, 0.885);
+  assert.ok(risk.warnings[0].riskRatio > 0.8 && risk.warnings[0].riskRatio <= 1);
   assert.ok(account.positions['crypto:BTCUSDT']);
 });
 
@@ -1367,13 +1388,14 @@ test('portfolioView exposes the v2 margin fields in cross mode', () => {
   const account = leveragedAccount({ marginMode: 'cross' });
   openCrypto10x(account);
   const view = portfolioView(account, { 'crypto:BTCUSDT': cryptoQuote() }, RATES_ONE, NOW_FRI, CFG);
+  const positionMaintenance = round2(0.1 * 60000 * CRYPTO_MMR);
   assert.equal(view.marginMode, 'cross');
-  assert.equal(view.marginUsed, 30); // cross mode uses the maintenance margin
-  assert.equal(view.maintenanceMargin, 30);
-  assert.equal(view.riskRatio, 0.0003); // 30 / 99992.2
+  assert.equal(view.marginUsed, positionMaintenance); // cross mode uses the maintenance margin
+  assert.equal(view.maintenanceMargin, positionMaintenance);
+  assert.ok(Math.abs(view.riskRatio - (0.1 * 60000 * CRYPTO_MMR) / view.equity.total) < 1e-3);
   assert.equal(view.positions[0].liqPrice, null); // cross mode has no per-position liq price
   assert.equal(view.positions[0].riskRatio, null);
-  assert.equal(view.marginAvailable, round2(view.equity.total - 30));
+  assert.equal(view.marginAvailable, round2(view.equity.total - positionMaintenance));
   assert.equal(view.baseCurrency, 'USDT');
   assert.ok('takeProfit' in view.positions[0] && 'stopLoss' in view.positions[0]);
   assert.ok('openedAt' in view.positions[0]);
@@ -1685,16 +1707,18 @@ test('portfolioView 5th cfg argument drives liqPrice/riskRatio (v3)', () => {
   const low = portfolioView(account, quotes, RATES_ONE, NOW_FRI, CFG);
   const high = portfolioView(account, quotes, RATES_ONE, NOW_FRI, cfgHighMmr);
 
-  const expectedLowLiq = (60018 * 0.1 - 600.18) / (0.1 * 0.995);
+  const lowMaintenance = round2(0.1 * 60000 * CRYPTO_MMR);
+  const lowPosEquity = 600.18 - 1.8;
+  const expectedLowLiq = (60018 * 0.1 - 600.18) / (0.1 * (1 - CRYPTO_MMR));
   const expectedHighLiq = (60018 * 0.1 - 600.18) / (0.1 * 0.95);
   assert.ok(Math.abs(low.positions[0].liqPrice - expectedLowLiq) < 0.02);
   assert.ok(Math.abs(high.positions[0].liqPrice - expectedHighLiq) < 0.02);
   assert.ok(high.positions[0].liqPrice > low.positions[0].liqPrice + 1000);
-  assert.equal(low.positions[0].riskRatio, 0.0501);
+  assert.ok(Math.abs(low.positions[0].riskRatio - (0.1 * 60000 * CRYPTO_MMR) / lowPosEquity) < 1e-3);
   assert.equal(high.positions[0].riskRatio, 0.5014);
-  assert.equal(low.maintenanceMargin, 30);
+  assert.equal(low.maintenanceMargin, lowMaintenance);
   assert.equal(high.maintenanceMargin, 300);
-  assert.equal(low.riskRatio, 0.0501);
+  assert.ok(Math.abs(low.riskRatio - (0.1 * 60000 * CRYPTO_MMR) / lowPosEquity) < 1e-3);
   assert.equal(high.riskRatio, 0.5014);
 });
 
@@ -1780,4 +1804,266 @@ test('portfolioView: a short opened today measures todayPnl from its entry price
   overnightAccount.positions['crypto:BTCUSDT'] = overnightPosition({ side: 'short', avgCost: 59982, margin: 599.82, debt: 5398.38 });
   const overnightView = portfolioView(overnightAccount, quotes, RATES_ONE, NOW_FRI, CFG);
   assert.equal(overnightView.positions[0].todayPnl, -40); // (59500 - 59900) * 0.1
+});
+
+// ===========================================================================
+// v1.3.0 (v5): independent leverage caps + arbitrary FX pairs (USD settled)
+// ===========================================================================
+
+const FX_RATES_ONE = { CNY: 1, USD: 1, HKD: 1, USDT: 1 };
+const FX_MMR = CFG.margin.mmr.fx;
+
+const eurJpyQuote = (overrides = {}) => makeQuote({
+  symbol: 'fx:EURJPY', market: 'fx', code: 'EURJPY', name: '欧元/日元', currency: 'JPY',
+  price: 181.42, prevClose: 180.9,
+  baseCurrency: 'EUR', quoteCurrency: 'JPY', usdPerBase: 1.0852, usdPerQuote: 0.00598,
+  extra: {}, ...overrides
+});
+
+const usdJpyQuote = (overrides = {}) => makeQuote({
+  symbol: 'fx:USDJPY', market: 'fx', code: 'USDJPY', name: '美元/日元', currency: 'JPY',
+  price: 157.5, prevClose: 157.0,
+  baseCurrency: 'USD', quoteCurrency: 'JPY', usdPerBase: 1, usdPerQuote: 0.006349,
+  extra: {}, ...overrides
+});
+
+function fxAccount(initialCapital = 100000) {
+  return createAccount({ id: 'acc_fx', name: '外汇账户', initialCapital, baseCurrency: 'USD' }, { now: NOW_FRI });
+}
+
+test('v5 leverage caps: 20 / 500 / 1000 are accepted and cap+1 is rejected', () => {
+  const capsCfg = { ...CFG, leverage: { cn: 1, hk: 20, us: 20, fx: 1000, crypto: 500 } };
+
+  const usAccount = makeAccount({ baseCurrency: 'USD', initialCapital: 10000 });
+  const usOrder = { symbol: 'us:usAAPL', side: 'buy', type: 'market', qty: 1, leverage: 20 };
+  const usFill = placeOrder(usAccount, usOrder, usQuote({ ask: [{ price: 200.01, size: 10 }] }), { cfg: capsCfg, now: NOW_US_THU });
+  assert.equal(usFill.error, null);
+  assert.equal(usFill.fill.fees, 1);
+  assert.equal(usAccount.positions['us:usAAPL'].margin, 10); // 200.03 / 20
+  const usOver = placeOrder(usAccount, { ...usOrder, leverage: 21 }, usQuote(), { cfg: capsCfg, now: NOW_US_THU });
+  assert.equal(usOver.error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.match(usOver.error.message, /20x/);
+
+  const cryptoAccount = leveragedAccount();
+  const cryptoFill = placeOrder(cryptoAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 500 }, cryptoQuote(), { cfg: capsCfg, now: NOW_FRI });
+  assert.equal(cryptoFill.error, null);
+  assert.equal(cryptoAccount.positions['crypto:BTCUSDT'].margin, 12); // 6001.8 / 500
+  const cryptoOver = placeOrder(cryptoAccount, { symbol: 'crypto:BTCUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 501 }, cryptoQuote(), { cfg: capsCfg, now: NOW_FRI });
+  assert.equal(cryptoOver.error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.match(cryptoOver.error.message, /500x/);
+
+  const fxAcc = fxAccount();
+  const fxFill = placeOrder(fxAcc, { symbol: 'fx:EURUSD', side: 'buy', type: 'market', qty: 1000, leverage: 1000 }, fxQuote(), { cfg: capsCfg, now: NOW_FRI });
+  assert.equal(fxFill.error, null);
+  assert.equal(fxAcc.positions['fx:EURUSD'].margin, 1.08); // (1000 × 1.0803) / 1000
+  const fxOver = placeOrder(fxAcc, { symbol: 'fx:EURUSD', side: 'buy', type: 'market', qty: 1000, leverage: 1001 }, fxQuote(), { cfg: capsCfg, now: NOW_FRI });
+  assert.equal(fxOver.error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.match(fxOver.error.message, /1000x/);
+
+  // A-share stays 1x and cannot be shorted even with high caps configured
+  const cnAccount = makeAccount();
+  assert.equal(placeOrder(cnAccount, { symbol: 'cn:sh600519', side: 'buy', type: 'market', qty: 100, leverage: 2 }, cnQuote(), { cfg: capsCfg, now: NOW_FRI }).error.code, 'LEVERAGE_NOT_ALLOWED');
+  assert.equal(placeOrder(cnAccount, { symbol: 'cn:sh600519', side: 'sell', type: 'market', qty: 100, leverage: 2 }, cnQuote(), { cfg: capsCfg, now: NOW_FRI }).error.code, 'SHORT_NOT_ALLOWED');
+});
+
+test('fx cross pair EURJPY opens with USD margin/debt and a USD notional', () => {
+  const account = fxAccount();
+  const result = placeOrder(account, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 10 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(result.error, null);
+  assert.equal(result.fill.price, 181.46989); // mid 181.42 ± half spread + 2bp slippage
+  assert.equal(result.fill.fees, 0); // fx has no commission (cost is the spread)
+
+  const position = account.positions['fx:EURJPY'];
+  assert.equal(position.currency, 'USD'); // USD settled regardless of the quote currency
+  assert.equal(position.notionalUsd, 1085.2); // 1000 × usdPerBase 1.0852
+  assert.equal(position.margin, 108.52); // notionalUsd / leverage
+  assert.equal(position.debt, 976.68);
+  assert.equal(position.interestAnnual, CFG.margin.interestAnnual.fx);
+  assert.equal(account.cash.USD, 99891.48); // margin + fee deducted from the USD cash
+
+  const view = portfolioView(account, { 'fx:EURJPY': eurJpyQuote() }, FX_RATES_ONE, NOW_FRI, CFG);
+  const positionView = view.positions[0];
+  assert.equal(positionView.notionalUsd, 1085.2);
+  assert.equal(positionView.marketValue, 1085.2); // current USD exposure (qty × usdPerBase)
+  assert.equal(positionView.unrealizedPnl, -0.3); // 1085.2 × (181.42/181.46989 − 1)
+  assert.equal(positionView.todayPnl, -0.3); // opened today -> same basis as unrealised PnL
+  assert.equal(positionView.maintenanceMargin, round2(1085.2 * FX_MMR));
+  const expectedLiq = 181.46989 * (1 - (108.52 - 1085.2 * FX_MMR) / 1085.2);
+  assert.ok(Math.abs(positionView.liqPrice - expectedLiq) < 0.01, `liqPrice ${positionView.liqPrice} vs ${expectedLiq}`);
+
+  // leveraged fx opens report INSUFFICIENT_MARGIN when the USD cash cannot cover it
+  const poor = fxAccount(100);
+  const rejected = placeOrder(poor, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 10 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(rejected.error.code, 'INSUFFICIENT_MARGIN');
+  assert.match(rejected.error.message, /保证金/);
+});
+
+test('fx USDJPY short settles in USD and books USD PnL', () => {
+  const account = fxAccount();
+  const result = placeOrder(account, { symbol: 'fx:USDJPY', side: 'sell', type: 'market', qty: 10000, leverage: 20 }, usdJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(result.error, null);
+  assert.equal(result.fill.price, 157.45669);
+  const position = account.positions['fx:USDJPY'];
+  assert.equal(position.side, 'short');
+  assert.equal(position.notionalUsd, 10000); // 10000 × usdPerBase 1
+  assert.equal(position.margin, 500);
+  assert.equal(position.debt, 9500);
+  assert.equal(account.cash.USD, 99500);
+
+  const view = portfolioView(account, { 'fx:USDJPY': usdJpyQuote({ price: 157 }) }, FX_RATES_ONE, NOW_FRI, CFG);
+  const positionView = view.positions[0];
+  assert.equal(positionView.unrealizedPnl, 29); // 10000 × (1 − 157/157.45669)
+  assert.equal(positionView.todayPnl, 29);
+  assert.equal(positionView.maintenanceMargin, round2(10000 * FX_MMR));
+  const expectedLiq = 157.45669 * (1 + (500 - 10000 * FX_MMR) / 10000);
+  assert.ok(Math.abs(positionView.liqPrice - expectedLiq) < 0.01);
+});
+
+test('fx partial close carries notionalUsd/margin proportionally', () => {
+  const account = fxAccount();
+  placeOrder(account, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 10 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  const close = placeOrder(account, { symbol: 'fx:EURJPY', side: 'sell', type: 'market', qty: 500, close: true }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(close.error, null);
+  assert.equal(close.fill.price, 181.37011);
+  assert.equal(close.fill.realizedPnl, -0.3); // half of the USD notional × ratio change
+  assert.equal(account.cash.USD, 99945.44);
+
+  const position = account.positions['fx:EURJPY'];
+  assert.equal(position.qty, 500);
+  assert.equal(position.notionalUsd, 542.6);
+  assert.equal(position.margin, 54.26);
+  assert.equal(position.debt, 488.34);
+  assert.equal(position.avgCost, 181.46989); // average cost unchanged when reducing
+});
+
+test('fx 100x position liquidates on the USD-notional basis', () => {
+  const account = fxAccount();
+  const opened = placeOrder(account, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 100 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(opened.error, null);
+  assert.equal(account.positions['fx:EURJPY'].margin, 10.85);
+  const liqPrice = portfolioView(account, { 'fx:EURJPY': eurJpyQuote() }, FX_RATES_ONE, NOW_FRI, CFG).positions[0].liqPrice;
+  assert.ok(liqPrice > 169 && liqPrice < 181, `liqPrice ${liqPrice}`);
+
+  const crashPrice = Math.floor(liqPrice) - 10;
+  const risk = checkRisk(account, { 'fx:EURJPY': eurJpyQuote({ price: crashPrice }) }, FX_RATES_ONE, { cfg: CFG, now: NOW_FRI });
+  const execPrice = roundToPrice(crashPrice * (1 - 0.000075) * (1 - 0.0002), 5);
+  const gross = 1085.2 * (execPrice / 181.46989 - 1);
+  assert.equal(risk.liquidations.length, 1);
+  assert.equal(risk.liquidations[0].reason, 'LIQUIDATION');
+  assert.equal(risk.liquidations[0].price, execPrice);
+  assert.equal(risk.liquidations[0].pnl, round2(gross)); // fx liquidation fee rate is 0
+  assert.equal(risk.liquidations[0].fees, 0);
+  assert.equal(account.positions['fx:EURJPY'], undefined);
+  assert.equal(account.cash.USD, round2(99989.15 + 10.85 + gross));
+});
+
+test('fx cross-pair todayPnl keeps the ratio basis (same-day vs overnight)', () => {
+  const account = fxAccount();
+  placeOrder(account, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 10 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  const quotes = { 'fx:EURJPY': eurJpyQuote({ price: 182, prevClose: 180.9 }) };
+  const intraday = portfolioView(account, quotes, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+  const expectedIntraday = 1085.2 * (182 / 181.46989 - 1);
+  assert.ok(Math.abs(intraday.todayPnl - expectedIntraday) < 0.01);
+  assert.equal(intraday.todayPnl, intraday.unrealizedPnl);
+  assert.notEqual(intraday.todayPnl, round2((182 - 181.46989) * 1000)); // not the quote-currency delta
+
+  // the same position held overnight measures from prevClose with the ratio formula
+  const overnight = account.positions['fx:EURJPY'];
+  overnight.openedAt = YESTERDAY;
+  const overnightView = portfolioView(account, quotes, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+  const expectedOvernight = 1085.2 * (182 / 180.9 - 1);
+  assert.ok(Math.abs(overnightView.todayPnl - expectedOvernight) < 0.01);
+  assert.ok(Math.abs(overnightView.unrealizedPnl - expectedIntraday) < 0.01);
+});
+
+test('an fx archive without notionalUsd reconstructs it from margin/debt (restart safe)', () => {
+  // Simulates a position stored by a normalizer that does not know notionalUsd yet
+  // (or an old archive): the USD basis must be reconstructed instead of falling back
+  // to the quote-currency formulas.
+  const account = fxAccount();
+  account.positions['fx:EURUSD'] = {
+    symbol: 'fx:EURUSD', market: 'fx', name: '欧元美元', currency: 'USD', side: 'long',
+    qty: 1000, avgCost: 1.0803, leverage: 10, margin: 108.03, debt: 972.27,
+    accruedInterest: 0, interestAnnual: 0.03, lastInterestAt: YESTERDAY, takeProfit: null, stopLoss: null,
+    openedAt: YESTERDAY, todayBuyQty: 0, todayBuyDate: null
+  };
+  const quotes = { 'fx:EURUSD': fxQuote({ price: 1.09, prevClose: 1.08 }) };
+  const position = portfolioView(account, quotes, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+  const notionalUsd = 108.03 + 972.27; // reconstructed from the persisted margin + debt
+  assert.equal(position.notionalUsd, round2(notionalUsd));
+  // for a USD-quoted pair the USD basis is numerically identical to the old formula
+  assert.equal(position.unrealizedPnl, 9.7); // (1.09 - 1.0803) * 1000
+  assert.equal(position.todayPnl, 10); // overnight: (1.09 - 1.08) * 1000
+  assert.equal(position.maintenanceMargin, round2(notionalUsd * FX_MMR));
+  const expectedLiq = 1.0803 * (1 - (108.03 - notionalUsd * FX_MMR) / notionalUsd);
+  assert.ok(Math.abs(position.liqPrice - expectedLiq) < 1e-4);
+
+  // A hard restart (field dropped) must not change the risk numbers of a live position.
+  const live = fxAccount();
+  placeOrder(live, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 10 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+  const before = portfolioView(live, { 'fx:EURJPY': eurJpyQuote() }, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+  delete live.positions['fx:EURJPY'].notionalUsd; // what the store normalizer currently does
+  const after = portfolioView(live, { 'fx:EURJPY': eurJpyQuote() }, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+  assert.equal(after.notionalUsd, before.notionalUsd);
+  assert.equal(after.unrealizedPnl, before.unrealizedPnl);
+  assert.equal(after.liqPrice, before.liqPrice);
+  assert.equal(after.maintenanceMargin, before.maintenanceMargin);
+});
+
+test('fx USDCNY (USD base) uses the USD notional directly', () => {
+  const quote = () => makeQuote({
+    symbol: 'fx:USDCNY', market: 'fx', code: 'USDCNY', name: '美元/人民币', currency: 'CNY',
+    price: 7.2, prevClose: 7.18,
+    baseCurrency: 'USD', quoteCurrency: 'CNY', usdPerBase: 1, usdPerQuote: 0.1389,
+    extra: {}
+  });
+  const account = fxAccount();
+  const opened = placeOrder(account, { symbol: 'fx:USDCNY', side: 'buy', type: 'market', qty: 5000, leverage: 20 }, quote(), { cfg: CFG, now: NOW_FRI });
+  assert.equal(opened.error, null);
+  const position = account.positions['fx:USDCNY'];
+  assert.equal(position.notionalUsd, 5000); // 5000 × usdPerBase 1
+  assert.equal(position.margin, 250);
+  assert.equal(position.debt, 4750);
+  assert.equal(account.cash.USD, 99750);
+
+  const view = portfolioView(account, { 'fx:USDCNY': quote() }, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+  const expectedPnl = 5000 * (7.2 / position.avgCost - 1);
+  assert.equal(view.unrealizedPnl, round2(expectedPnl));
+  assert.ok(view.liqPrice < position.avgCost && view.liqPrice > 0);
+});
+
+test('store keeps the fx notionalUsd (and unknown position fields) across save/load', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'papertrader-store-fx-'));
+  try {
+    const store = createStore({ dataDir: dir, watchlist: [] });
+    store.load();
+    const account = fxAccount();
+    const opened = placeOrder(account, { symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 10 }, eurJpyQuote(), { cfg: CFG, now: NOW_FRI });
+    assert.equal(opened.error, null);
+    account.positions['fx:EURJPY'].futureField = { note: 'kept' }; // unknown position-level field
+    const quotes = { 'fx:EURJPY': eurJpyQuote() };
+    const before = portfolioView(account, quotes, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+    store.addAccount(account);
+
+    const reloaded = createStore({ dataDir: dir }).load().accounts.acc_fx;
+    assert.equal(reloaded.positions['fx:EURJPY'].notionalUsd, 1085.2);
+    assert.deepEqual(reloaded.positions['fx:EURJPY'].futureField, { note: 'kept' });
+
+    const after = portfolioView(reloaded, quotes, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+    assert.equal(after.notionalUsd, before.notionalUsd);
+    assert.ok(Math.abs(after.unrealizedPnl - before.unrealizedPnl) <= 0.01);
+    assert.ok(Math.abs(after.liqPrice - before.liqPrice) <= 0.01);
+    assert.ok(Math.abs(after.maintenanceMargin - before.maintenanceMargin) <= 0.01);
+
+    // An invalid stored value is dropped so the engine can rebuild it from margin+debt.
+    store.getAccount('acc_fx').positions['fx:EURJPY'].notionalUsd = 'not-a-number';
+    store.replaceAccount(store.getAccount('acc_fx'));
+    const sanitized = createStore({ dataDir: dir }).load().accounts.acc_fx.positions['fx:EURJPY'];
+    assert.equal(sanitized.notionalUsd, undefined);
+    const rebuilt = portfolioView(createStore({ dataDir: dir }).load().accounts.acc_fx, quotes, FX_RATES_ONE, NOW_FRI, CFG).positions[0];
+    assert.ok(Math.abs(rebuilt.unrealizedPnl - before.unrealizedPnl) <= 0.01); // margin+debt fallback
+    assert.ok(Math.abs(rebuilt.liqPrice - before.liqPrice) <= 0.01);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });

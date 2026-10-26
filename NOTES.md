@@ -181,6 +181,22 @@
 - 回归测试：把页面 `Date.now()` 前推 2 小时，A股 1m 最后一根必须仍是 15:00（修复前会出现周日时间的新蜡烛）；加密 1m 在 80s 后最后一根时间必须前进。图表实例加 `window.__charts` 调试句柄（`lastBarTime/barCount`）供 E2E 断言，不影响功能。
 - 教训：**图表「实时更新」要用行情自己的时间，不能用墙钟**；对「休市/节假日/跨日」这类边界，宁可触发重载，也不要在客户端编造数据。
 
+## 18. 杠杆模型 v5 与任意外汇对（v1.3.0）
+
+**为什么删掉倍率**：倍率（0.1×–2×）本质是「基准杠杆 × 倍率」的间接表达，上线后用户根本记不住每个市场基准是多少，还要在脑里换算；调高倍率又会让默认 mmr 超 `0.9/上限`（v1.2.1 的创建失败就是这么来的）。v5 直接把用户真正关心的三个数暴露出来：**股票 1–20、加密 1–500、外汇 1–1000**，每笔订单在 `1..上限` 内自选。
+- 引擎不关心上限从哪来，只认 `cfg.leverage[market]`；倍率→上限的换算集中在 server 的 `effectiveLeverage()`，因此引擎改动很小。
+- 上限与 mmr 是**强耦合**：`mmr ≤ 0.9/上限`。上限 1000x 时 mmr 上限只有 0.09%，所以 config 默认值从 crypto 0.5% 降到 0.1%、fx 0.25% 降到 0.05%；前端调上限时必须同步夹紧 mmr，否则默认值组合天然非法。
+- 旧账户迁移放在 `mergeSettings`：看到 `leverageMultiplier` 就换算 `stock=clamp(10m,1,20)`、`crypto=clamp(100m,1,500)`、`fx=clamp(200m,1,1000)`，之后删掉该字段。注意 ESM `const` 不提升——`bootstrap()` 依赖这些常量，必须移到常量定义之后再调用（否则 `Cannot access ... before initialization`）。
+
+**任意外汇对**：
+- 10 个币种两两组合 = 90 个 `fx:<BASE><QUOTE>`；内置 12 对优先用腾讯原始报价，其余用「各币种兑 USD 的腿」交叉：`price = usdPerBase / usdPerQuote`。
+- OHLC 合成要注意方向：`h = h_base / l_quote`、`l = l_base / h_quote`；倒数腿（USDJPY 等）先取倒数再套公式，否则高低会翻转。合成对没有成交量，v=0 要如实标出。
+- **腾讯的 EURJPY/GBPJPY 实际已停更**（2026-08-10）且与 USD 腿偏离 >1%；这类「有接口但数据烂」的源比没有更危险——发现偏离时自动改用 USD 腿合成（`source:'cross'`），并保证 `price` 与 `usdPerBase/usdPerQuote` 自洽。
+- 结算模型：外汇仓位统一 USD 结算。`notionalUsd = qty × usdPerBase`，多仓盈亏 `N×(price/avgCost−1)`；USD 报价对（EURUSD）下 `usdPerBase == price`，退化为旧公式，老仓位（无 notionalUsd）也走旧公式，保证向后兼容。
+- `notionalUsd` 必须进 store 的 position 归一化白名单；否则重启后引擎只能靠 `margin+debt` 重建（±0.01 误差），USD 结算会退化成 quote 币种公式（实测浮盈 -49.89 vs -0.3）。
+- 教训：**「任意组合」类功能的成本在数据合成与边界，不在 UI**；把方向/倒数/停更源处理干净，比多放几个选择框重要。
+
+
 
 
 

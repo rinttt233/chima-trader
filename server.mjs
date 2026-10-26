@@ -36,7 +36,8 @@ const MIME = {
 
 const store = createStore({ dataDir: DATA_DIR });
 store.load();
-bootstrap(store.state, store);
+// NOTE: bootstrap() needs the account-settings constants/functions below, so it
+// runs after that block instead of here (ESM `const` is not hoisted).
 
 const state = store.state;
 const STARTED_AT = Date.now();
@@ -77,12 +78,15 @@ function bootstrap(st, stStore) {
   stStore.save();
 }
 
-// ------------------------------------------------ account-level settings (v3)
+// ------------------------------------------------ account-level settings (v5)
 
 const SETTINGS_META = CONFIG.accountSettings || {};
 const SETTINGS_RANGES = SETTINGS_META.ranges || {};
-const LEVERAGE_CEILING = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125, ...(SETTINGS_META.leverageCeiling || {}) };
 const MARKETS = ['cn', 'hk', 'us', 'fx', 'crypto'];
+const LEVERAGE_CAP_KEYS = ['stock', 'crypto', 'fx'];
+const LEVERAGE_CAP_LABELS = { stock: '股票（港/美股）', crypto: '加密货币', fx: '外汇' };
+const LEVERAGE_CAP_RANGES = SETTINGS_RANGES.leverageCaps || { stock: [1, 20], crypto: [1, 500], fx: [1, 1000] };
+const LEVERAGE_CAP_DEFAULTS = { stock: 10, crypto: 100, fx: 200, ...(SETTINGS_META.leverageCaps || {}) };
 
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
@@ -93,9 +97,45 @@ function num(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function capRange(key) {
+  const range = LEVERAGE_CAP_RANGES[key];
+  return Array.isArray(range) && range.length === 2 ? range : [1, 1];
+}
+
+function clampCap(key, value) {
+  const [min, max] = capRange(key);
+  const rounded = Math.round(num(value, LEVERAGE_CAP_DEFAULTS[key]));
+  return Math.min(max, Math.max(min, Number.isFinite(rounded) ? rounded : min));
+}
+
+function defaultCaps() {
+  return Object.fromEntries(LEVERAGE_CAP_KEYS.map((key) => [key, clampCap(key, LEVERAGE_CAP_DEFAULTS[key])]));
+}
+
+function normalizedCaps(settings) {
+  const out = defaultCaps();
+  const src = settings?.leverageCaps;
+  if (src && typeof src === 'object') {
+    for (const key of LEVERAGE_CAP_KEYS) {
+      if (src[key] !== undefined) out[key] = clampCap(key, src[key]);
+    }
+  }
+  return out;
+}
+
+/** v3 accounts stored a single multiplier; map it onto the three v5 caps. */
+function capsFromLegacyMultiplier(multiplier) {
+  const m = num(multiplier, 1);
+  return {
+    stock: clampCap('stock', 10 * m),
+    crypto: clampCap('crypto', 100 * m),
+    fx: clampCap('fx', 200 * m),
+  };
+}
+
 function defaultAccountSettings() {
   return {
-    leverageMultiplier: 1,
+    leverageCaps: defaultCaps(),
     fees: cloneJson(CONFIG.fees || {}),
     slippageBps: cloneJson(CONFIG.slippageBps || {}),
     margin: cloneJson(CONFIG.margin || {}),
@@ -116,7 +156,16 @@ function mergeFees(base, patch) {
 function mergeSettings(base, patch) {
   const out = cloneJson(base);
   if (!patch || typeof patch !== 'object') return out;
-  if (patch.leverageMultiplier !== undefined) out.leverageMultiplier = num(patch.leverageMultiplier, out.leverageMultiplier);
+  delete out.leverageMultiplier;
+  if (patch.leverageCaps && typeof patch.leverageCaps === 'object') {
+    const caps = normalizedCaps(out);
+    for (const key of LEVERAGE_CAP_KEYS) {
+      if (patch.leverageCaps[key] !== undefined) caps[key] = num(patch.leverageCaps[key], caps[key]);
+    }
+    out.leverageCaps = caps;
+  } else if (patch.leverageMultiplier !== undefined) {
+    out.leverageCaps = capsFromLegacyMultiplier(patch.leverageMultiplier);
+  }
   if (patch.fees) out.fees = mergeFees(out.fees, patch.fees);
   if (patch.slippageBps) out.slippageBps = { ...out.slippageBps, ...patch.slippageBps };
   if (patch.margin) {
@@ -130,20 +179,10 @@ function mergeSettings(base, patch) {
   return out;
 }
 
-// Per-account leverage ceiling: base config leverage scaled by the account multiplier, clamped.
+// Per-account leverage cap per instrument class (v5): no multiplier any more.
 function effectiveLeverage(settings) {
-  const multiplier = num(settings?.leverageMultiplier, 1);
-  const out = {};
-  for (const market of MARKETS) {
-    if (market === 'cn') {
-      out.cn = 1;
-      continue;
-    }
-    const base = num(CONFIG.leverage?.[market], 1);
-    const ceiling = num(LEVERAGE_CEILING[market], base);
-    out[market] = Math.min(ceiling, Math.max(1, Math.round(base * multiplier)));
-  }
-  return out;
+  const caps = normalizedCaps(settings);
+  return { cn: 1, hk: caps.stock, us: caps.stock, fx: caps.fx, crypto: caps.crypto };
 }
 
 function rangeCheck(errors, field, value, range) {
@@ -161,14 +200,22 @@ function fmtPct(value) {
 function validateSettings(settings) {
   const errors = [];
   const ranges = SETTINGS_RANGES;
-  rangeCheck(errors, 'leverageMultiplier', num(settings.leverageMultiplier, NaN), ranges.leverageMultiplier);
+  const caps = normalizedCaps(settings);
+  for (const key of LEVERAGE_CAP_KEYS) {
+    const raw = settings?.leverageCaps?.[key];
+    const value = num(raw, NaN);
+    const [min, max] = capRange(key);
+    if (!Number.isFinite(value) || value < min || value > max || Math.round(value) !== value) {
+      errors.push(`leverageCaps.${key} 必须是 ${min} – ${max} 之间的整数`);
+    }
+  }
   const leverage = effectiveLeverage(settings);
   for (const market of MARKETS) {
     const mmr = num(settings?.margin?.mmr?.[market], NaN);
     rangeCheck(errors, `margin.mmr.${market}`, mmr, ranges.margin?.mmr?.[market]);
-    if (market !== 'cn' && Number.isFinite(mmr) && mmr > 0.9 / leverage[market]) {
+    if (market !== 'cn' && Number.isFinite(mmr) && mmr > 0.9 / leverage[market] + 1e-12) {
       errors.push(
-        `margin.mmr.${market} 当前 ${fmtPct(mmr)}，倍率 ${num(settings.leverageMultiplier, 1)}×（上限 ${leverage[market]}x）下最高 ${fmtPct(0.9 / leverage[market])}`,
+        `margin.mmr.${market} 当前 ${fmtPct(mmr)}，杠杆上限 ${leverage[market]}x 下最高 ${fmtPct(0.9 / leverage[market])}`,
       );
     }
     rangeCheck(errors, `slippageBps.${market}`, num(settings?.slippageBps?.[market], NaN), ranges.slippageBps);
@@ -206,10 +253,12 @@ function settingsLocked(account) {
 
 function riskSettingsKey(settings) {
   return JSON.stringify({
-    leverageMultiplier: num(settings.leverageMultiplier, 1),
+    leverageCaps: normalizedCaps(settings),
     margin: settings.margin || {},
   });
 }
+
+bootstrap(store.state, store);
 
 function nowIso() {
   return new Date().toISOString();
@@ -721,12 +770,19 @@ route('GET', /^\/api\/health$/, async (_req, res) => {
 
 route('GET', /^\/api\/markets$/, async (_req, res) => {
   const meta = await marketdata.getMarkets();
+  const globalMax = {
+    cn: 1,
+    hk: capRange('stock')[1],
+    us: capRange('stock')[1],
+    fx: capRange('fx')[1],
+    crypto: capRange('crypto')[1],
+  };
   const markets = (meta || []).map((m) => ({
     ...m,
     sessions: CONFIG.sessions?.[m.id] || m.sessions || [],
-    maxLeverage: Number(CONFIG.leverage?.[m.id] ?? 1),
+    maxLeverage: globalMax[m.id] ?? 1,
     mmr: Number(CONFIG.margin?.mmr?.[m.id] ?? 1),
-    shortable: m.id !== 'cn' && Number(CONFIG.leverage?.[m.id] ?? 1) > 1,
+    shortable: m.id !== 'cn',
   }));
   sendJson(res, 200, { markets });
 });
@@ -844,29 +900,42 @@ route('GET', /^\/api\/accounts$/, async (_req, res) => {
 
 route('GET', /^\/api\/settings\/meta$/, async (_req, res) => {
   const metaMarkets = (await marketdata.getMarkets()) || [];
+  const maxLeverageByMarket = {
+    cn: 1,
+    hk: capRange('stock')[1],
+    us: capRange('stock')[1],
+    fx: capRange('fx')[1],
+    crypto: capRange('crypto')[1],
+  };
   const markets = metaMarkets.map((market) => ({
     id: market.id,
     name: market.name,
     currency: market.currency,
-    baseLeverage: num(CONFIG.leverage?.[market.id], 1),
-    maxLeverageCeiling: num(LEVERAGE_CEILING[market.id], num(CONFIG.leverage?.[market.id], 1)),
+    maxLeverage: maxLeverageByMarket[market.id] ?? 1,
+    maxLeverageCeiling: maxLeverageByMarket[market.id] ?? 1,
     shortable: market.id !== 'cn',
   }));
   sendJson(res, 200, {
     markets,
     ranges: SETTINGS_RANGES,
-    presets: SETTINGS_META.presets || {},
-    multiplier: {
-      range: SETTINGS_RANGES.leverageMultiplier || [0.1, 2],
-      default: 1,
-      quick: [0.1, 0.25, 0.5, 1, 2],
+    leverageCaps: {
+      keys: LEVERAGE_CAP_KEYS,
+      labels: LEVERAGE_CAP_LABELS,
+      ranges: LEVERAGE_CAP_RANGES,
+      defaults: LEVERAGE_CAP_DEFAULTS,
     },
+    presets: SETTINGS_META.presets || {},
     defaults: {
       settings: defaultAccountSettings(),
       initialCapital: num(CONFIG.defaults?.initialCapital, 1_000_000),
       baseCurrency: CONFIG.defaults?.baseCurrency || 'CNY',
     },
   });
+});
+
+route('GET', /^\/api\/fx\/currencies$/, async (_req, res) => {
+  const currencies = typeof marketdata.getFxCurrencies === 'function' ? await marketdata.getFxCurrencies() : [];
+  sendJson(res, 200, { currencies });
 });
 
 route('GET', /^\/api\/backup\/status$/, async (_req, res) => {

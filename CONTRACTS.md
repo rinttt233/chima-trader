@@ -50,7 +50,7 @@ chima-trader/
 | `cn` | `sh600519` `sz000001` `sh000001` `bj430047` | A股（含指数，指数仅展示不可交易） | CNY |
 | `hk` | `hk00700` | 港股 | HKD |
 | `us` | `usAAPL` `usNVDA` `usSPY` | 美股 | USD |
-| `fx` | `fx:EURUSD` `fx:USDJPY` `fx:XAUUSD` `fx:XAGUSD` | 外汇/金银 | 见 3.4 |
+| `fx` | `fx:EURUSD` `fx:USDJPY` `fx:EURJPY` `fx:USDCNY` `fx:XAUUSD` … | 外汇/金银；**任意两个币种**组成的货币对（见 §6D） | 见 3.4 |
 | `crypto` | `crypto:BTCUSDT` `crypto:ETHUSDT` | Binance 现货 | USDT |
 
 **规范化规则**：一律以 `market:code` 为唯一真源（`cn:sh600519`、`hk:hk00700`、`us:usAAPL`、`fx:EURUSD`、`crypto:BTCUSDT`）。`parseSymbol()` 额外接受别名（`fx:fxEURUSD`、`whEURUSD`、`crypto:cryptoBTCUSDT`、裸 `BTCUSDT`），**但返回值里的 `symbol` 一定是规范化形式**。HTTP 层入库/入库前统一归一（watchlist、委托、持仓、提醒的 key 都用规范化形式），接口返回的 `quote.symbol` 也用规范化形式；`errors[].symbol` 回显请求时的原字符串。
@@ -84,6 +84,11 @@ chima-trader/
   ts: '2026-10-23T16:14:58+08:00',        // 行情时间，带时区
   stale: false,             // 行情过期（采集失败用缓存时 true）
   source: 'tencent',
+  // fx 专用（其它市场为 null）：price = 1 base 换多少 quote
+  pairRate: 1.0852,          // = price（便于阅读，等价字段）
+  quoteCurrency: 'USD',      // base/quote，见 §6D
+  usdPerBase: 1.0852,        // 1 单位 base = 多少 USD（USD 结算用）
+  usdPerQuote: 1,            // 1 单位 quote = 多少 USD
   extra: {                  // 可选，前端只读展示
     limitUp: 1450.34, limitDown: 1186.64,   // A股涨跌停价，其它市场 null
     turnoverRate: 0.46, pe: 20.49, pb: 6.64, marketCap: 16688.59
@@ -116,7 +121,8 @@ chima-trader/
 
 - 账户基础币种默认 `CNY`；每个账户有独立的多币种现金账户 `cash: { CNY, HKD, USD, USDT }`。
 - 权益折算用 `getFxRates()`，返回对 CNY 的汇率：`{ CNY: 1, USD: 7.x, HKD: 0.85x, USDT: 7.x }`。
-- 外汇 symbol 的"币种"：`fxEURUSD`/`fxXAUUSD` 等一律以 **USD** 计价（EUR/USD 涨跌的盈亏以 USD 计）；`fxUSDCNY` 也按 USD 计价。UI 显示 `currency: 'USD'`。
+- **外汇 v5**：每个 `fx` 报价都有 base/quote 两个币种，`price` = 1 base 换多少 quote；同时给出 `usdPerBase / usdPerQuote`（每单位该币种值多少 USD）。
+- 外汇仓位的保证金、债务、盈亏**统一折算为 USD 结算**（`position.currency = 'USD'`），与 quote 的 quote 币种无关；`fxRates` 只用于账户权益折算成 CNY 等基础币种。
 
 ---
 
@@ -298,17 +304,18 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 
 ### 6A.1 能力范围
 
-| market | 最大杠杆 `cfg.leverage` | 允许做空 | 维持保证金率 `cfg.margin.mmr` | 借币年化 `cfg.margin.interestAnnual` | 强平费 `cfg.margin.liquidationFeeRate` |
+| market | 有效杠杆上限 `cfg.leverage` | 允许做空 | 维持保证金率默认 `cfg.margin.mmr` | 借币年化 | 强平费 |
 |---|---|---|---|---|---|
-| cn | 1 | 否 | — | 0 | 0 |
-| hk | 4 | 是 | 12.5% | 6% | 0.2% |
-| us | 4 | 是 | 12.5% | 6% | 0.2% |
-| fx | 100 | 是 | 0.5% | 3% | 0 |
-| crypto | 20 | 是 | 0.5% | 8% | 0.5% |
+| cn | 1（固定） | 否 | — | 0 | 0 |
+| hk | 账户 `leverageCaps.stock`（1–20） | 是 | 4% | 6% | 0.2% |
+| us | 账户 `leverageCaps.stock`（1–20） | 是 | 4% | 6% | 0.2% |
+| fx | 账户 `leverageCaps.fx`（1–1000） | 是 | 0.05% | 3% | 0 |
+| crypto | 账户 `leverageCaps.crypto`（1–500） | 是 | 0.1% | 8% | 0.5% |
 
-> 维持保证金率必须显著低于 `1/maxLeverage`（初始保证金率），否则开仓即贴强平线：4x 时初始 25%、维持 12.5% 才有 12.5% 的安全垫；100x 时初始 1%、维持 0.5%。
+> v5 起**取消杠杆倍率**：不再有 `leverageMultiplier`、`leverageCeiling`、「基准杠杆 × 倍率」换算。账户直接设置三个独立上限（股票/加密/外汇），单笔订单在下单时选择 `1..上限` 的杠杆。
+> 维持保证金率必须满足 `mmr <= 0.9 / 该市场上限`，否则开仓即贴强平线；因此 cap 越高，允许的 mmr 越小（500x/1000x 时上限分别为 0.18% / 0.09%）。服务端校验并给出「当前值 / 上限」的中文错误。
 
-- 杠杆默认 1（= 现货）。`leverage` 取 `[1, max]` 内整数/小数（crypto 支持 2/3/5/10/20，fx 支持 10/20/50/100；实现上只做范围校验，不限制档位）。
+- 杠杆默认 1（= 现货）；支持整数/小数，只做 `[1, 上限]` 范围校验。
 - A股（cn）恒为 1x、不可做空；对 cn 传 `leverage>1` 或开空 → `LEVERAGE_NOT_ALLOWED` / `SHORT_NOT_ALLOWED`。
 
 ### 6A.2 账户与持仓模型
@@ -330,8 +337,9 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
   symbol, market, name, currency,
   side: 'long' | 'short',
   qty,                    // 恒为正
-  avgCost,                // 开仓均价
-  leverage,               // 1..max
+  avgCost,                // 开仓均价（pair rate；USD 报价对即 USD 价）
+  notionalUsd,            // fx v5：开仓时 USD 名义价值 = qty × usdPerBase（老仓位缺省 = qty×avgCost）
+  leverage,               // 1..该市场上限
   margin,                 // 初始保证金（计价币种）
   debt,                   // 融资/借券金额（计价币种）= notional * (1 - 1/leverage)
   accruedInterest,        // 已计利息（计价币种），负债
@@ -368,6 +376,8 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 - 已有同向持仓：加仓，按加权平均成本，追加保证金；杠杆必须与现有持仓一致（不一致 → `LEVERAGE_MISMATCH`）。
 - 已有反向持仓且 `close !== true` → `POSITION_CONFLICT`（必须先平仓）。
 - `close: true`：方向必须与持仓相反（多仓用 sell，空仓用 buy），`qty <= 持仓量`；平仓盈亏：多 `(价-均价)*qty`，空 `(均价-价)*qty`，再扣手续费与已计利息；部分平仓按比例结转 `margin` 与 `accruedInterest`。
+  - **fx v5 例外（USD 结算）**：多仓 `notionalUsd × (price/avgCost − 1)`，空仓 `notionalUsd × (1 − price/avgCost)`。USD 报价对（如 EURUSD，`usdPerBase == price`）结果与旧公式完全一致。
+  - 实现：开仓/加仓时按加权平均更新 `notionalUsd`（`qty × usdPerBase`）；`margin = notionalUsd / leverage`、`debt = notionalUsd − margin`；未实现盈亏、强平、风险率都用同一口径。
 - 保证金不足 → `INSUFFICIENT_MARGIN`（不再用 `INSUFFICIENT_CASH` 表示杠杆开仓资金不足；杠杆=1 现货仍用 `INSUFFICIENT_CASH`）。
 - 限价挂单：开仓单需在成交时再校验保证金；平仓单成交时校验持仓仍存在。
 - T+1 仍只限制 cn 多头现货的可卖数量；杠杆仓位与其它市场 T+0。
@@ -404,11 +414,11 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 
 ```js
 {
-  leverageMultiplier: 1,        // 杠杆上限倍率：0.1 – 2.0，按市场基准杠杆换算（见 6B.1a）
+  leverageCaps: { stock: 10, crypto: 100, fx: 200 },   // v5：三个独立杠杆上限（整数）
   fees: { cn:{...}, hk:{...}, us:{...}, fx:{...}, crypto:{...} },   // 结构同 config.fees
   slippageBps: { cn:1, hk:1, us:1, fx:2, crypto:3 },
   margin: {
-    mmr: { cn:1, hk:0.05, us:0.05, fx:0.0025, crypto:0.005 },
+    mmr: { cn:1, hk:0.04, us:0.04, fx:0.0005, crypto:0.001 },
     interestAnnual: { cn:0, hk:0.06, us:0.06, fx:0.03, crypto:0.08 },
     liquidationFeeRate: { cn:0, hk:0.002, us:0.002, fx:0, crypto:0.005 }
   },
@@ -417,43 +427,46 @@ export function equitySeries(account, range, nowISO) // range: '1d'|'1w'|'1m'|'a
 }
 ```
 
-### 6B.1a 杠杆上限的换算
+### 6B.1a 杠杆上限（v5，取代倍率）
 
-- 市场基准杠杆 `base` = `config.json` 的 `leverage`（cn 1 / hk 10 / us 10 / fx 200 / crypto 100）。
-- 账户某市场实际杠杆上限 = `clamp(round(base × leverageMultiplier), 1, 系统上限)`；系统上限：cn 1 / hk 20 / us 20 / fx 500 / crypto 125。
-- 例：倍率 0.1 → 加密 10x / 外汇 20x / 港美 1x；倍率 1 → 100x / 200x / 10x；倍率 2 → 加密 125x（截断）/ 外汇 400x / 港美 20x。
-- A 股恒为 1x，不受倍率影响。
+- 三个独立上限：`leverageCaps.stock`（股票，港/美股，1–20）、`leverageCaps.crypto`（加密，1–500）、`leverageCaps.fx`（外汇，1–1000），必须为整数。
+- 各市场有效上限：`cn=1`、`hk=us=stock`、`crypto=crypto`、`fx=fx`；服务端把它作为 `cfg.leverage` 传给引擎。
+- **旧账户迁移**：没有 `leverageCaps` 但存在 `leverageMultiplier` 时按 `stock=clamp(round(10×m),1,20)`、`crypto=clamp(round(100×m),1,500)`、`fx=clamp(round(200×m),1,1000)` 换算一次，之后不再保留倍率。
+- 例：默认 `{10,100,200}` → 港/美股 10x、加密 100x、外汇 200x；激进 `{20,500,1000}` → 20x / 500x / 1000x；A 股始终 1x。
 
-服务端把 `account.settings` 深合并到全局配置上得到 **effective cfg**（其中 `leverage` 为换算后的各市场上限），用它调用 engine 的 `placeOrder / tickAccount / checkRisk / portfolioView`。`GET /api/accounts/:id` 返回 `settings` 与 `effective`（实际生效参数，含换算后的 leverage 与费率）。
+服务端把 `account.settings` 深合并到全局配置上得到 **effective cfg**（其中 `leverage` 为上述各市场上限），用它调用 engine 的 `placeOrder / tickAccount / checkRisk / portfolioView`。`GET /api/accounts/:id` 返回 `settings` 与 `effective`（实际生效参数，含 leverage 与费率）。
 
 ### 6B.2 校验范围（服务端强制；前端按 `/api/settings/meta` 渲染）
 
 | 字段 | 范围 |
 |---|---|
 | 初始资金 | 1,000 – 1,000,000,000 |
-| leverageMultiplier | 0.1 – 2.0（系统上限仍会截断：hk/us 20、fx 500、crypto 125、cn 1） |
+| leverageCaps.stock | 1 – 20 的整数 |
+| leverageCaps.crypto | 1 – 500 的整数 |
+| leverageCaps.fx | 1 – 1000 的整数 |
 | fees.commissionRate | 0 – 0.005 |
 | fees.commissionMin | 0 – 500 |
 | stampDutyRate / transferFeeRate / exchangeFeeRate / settlementFeeRate / secFeeRate | 0 – 0.001 |
 | fees.perShare | 0 – 0.1 |
 | fees.spreadBps | 0 – 100 |
 | slippageBps | 0 – 200 |
-| margin.mmr | cn 1；hk/us 0.005–0.5；fx/crypto 0.0005–0.1；且必须满足 `mmr <= 0.9 / 该市场实际杠杆上限` |
+| margin.mmr | cn 1；hk/us 0.0005–0.5；fx/crypto 0.0001–0.1；且必须满足 `mmr <= 0.9 / 该类杠杆上限` |
 | margin.interestAnnual | 0 – 0.5 |
 | margin.liquidationFeeRate | 0 – 0.05 |
 | fxConvertSpread | 0 – 0.02 |
 
-- `leverageMultiplier` 与 `margin.mmr` 是风险参数：有持仓或未成交委托时禁止修改（`SETTINGS_LOCKED`，HTTP 409）。
+- `leverageCaps` 与 `margin.mmr` 是风险参数：有持仓或未成交委托时禁止修改（`SETTINGS_LOCKED`，HTTP 409）。
 - `fees / slippageBps / autoConvert / fxConvertSpread` 随时可改，只影响之后的成交。
-- 全局 `config.json` 的值仍是默认值；`/api/markets.maxLeverage` 表示系统允许的档位上限。
+- 全局 `config.json` 的值仍是默认值；`/api/markets.maxLeverage` 表示该系统允许的最大上限。
 
 ### 6B.3 接口
 
 ```
 GET  /api/settings/meta
-   -> { markets:[{id,name,currency,baseLeverage,maxLeverageCeiling,shortable}],
-        ranges:{...}, presets:{ conservative:{...}, recommended:{...}, aggressive:{...} },
-        multiplier:{ range:[0.1,2], default:1, quick:[0.1,0.25,0.5,1,2] },
+   -> { markets:[{id,name,currency,maxLeverage,maxLeverageCeiling,shortable}],
+        ranges:{...},
+        leverageCaps:{ keys:['stock','crypto','fx'], labels:{...}, ranges:{stock:[1,20],crypto:[1,500],fx:[1,1000]}, defaults:{stock:10,crypto:100,fx:200} },
+        presets:{ conservative:{leverageCaps,margin}, recommended:{...}, aggressive:{...} },
         defaults:{ settings, initialCapital, baseCurrency } }
 
 POST /api/accounts                    body { name, initialCapital, baseCurrency?, marginMode?, settings? } -> { account }
@@ -462,9 +475,9 @@ PATCH /api/accounts/:id/settings      body { settings } -> { account }   // 部�
 
 ### 6B.4 推荐值
 
-- 杠杆上限倍率：**1×（推荐）** → cn 1 / hk 10 / us 10 / fx 200 / crypto 100；0.1× 保守（加密 10x / 外汇 20x / 港美 1x）；2× 激进（加密 125x / 外汇 400x / 港美 20x，按上限截断）
-- 维持保证金率：cn 1 / hk 5% / us 5% / fx 0.25% / crypto 0.5%
-- 费率与 §6.2 相同；滑点 cn/hk/us 1bp、fx 2bp、crypto 3bp；借币年化 crypto 8%、fx 3%、hk/us 6%；强平费 crypto 0.5%、hk/us 0.2%、fx 0；换汇成本 0.3%
+- 杠杆上限：`conservative {stock:5, crypto:25, fx:50}` / `recommended {10, 100, 200}` / `aggressive {20, 500, 1000}`。
+- 维持保证金率：cn 1 / hk 4% / us 4% / fx 0.05% / crypto 0.1%；若把上限调高导致 mmr 超 `0.9/上限`，保存时按上限自动夹紧并提示（前端也应即时夹紧）。
+- 费率与 §6.2 相同；滑点 cn/hk/us 1bp、fx 2bp、crypto 3bp；借币年化 crypto 8%、fx 3%、hk/us 6%；强平费 crypto 0.5%、hk/us 0.2%、fx 0；换汇成本 0.3%。
 
 ---
 
@@ -514,6 +527,49 @@ POST /api/backup/import   body { data:{format,version,accounts,...}, mode:'new-a
 
 ---
 
+## 6D. 任意币种外汇对（v5）
+
+### 6D.1 币种与符号
+
+- 支持币种（ISO 3 字母）：`USD EUR GBP JPY AUD CAD CHF NZD CNY HKD`。
+- 符号：`fx:<BASE><QUOTE>`，如 `fx:EURJPY`、`fx:GBPUSD`、`fx:USDCNY`、`fx:CADJPY`；任意两个不同币种组合均合法，共 90 个。
+- 内置 12 对（`FX_PAIRS`）与金银（`FX_METALS`）继续优先走腾讯原始报价；其它组合由 `lib/marketdata.mjs` 用「各币种兑 USD 的腿」交叉合成。
+
+### 6D.2 报价
+
+```js
+{
+  symbol:'fx:EURJPY', market:'fx', code:'EURJPY', name:'欧元/日元',
+  currency:'JPY',            // quote 币种
+  baseCurrency:'EUR', quoteCurrency:'JPY',
+  price: 181.42,             // 1 EUR 换多少 JPY
+  usdPerBase: 1.0852,        // 1 EUR = ? USD
+  usdPerQuote: 0.00598,      // 1 JPY = ? USD
+  bid:[{price,size}], ask:[{price,size}], ts, stale, source:'cross'
+}
+```
+
+- USD 腿来源：腾讯 `EURUSD/GBPUSD/AUDUSD/NZDUSD`（USD per X）、`USDJPY/USDCAD/USDCHF/USDCNY`（X per USD，取倒数）、`HKDCNY`（CNY per HKD，与 USDCNY 交叉得 USD per HKD）；`fxRates` 作为兜底。
+- 交叉汇率 `price = usdPerBase / usdPerQuote`；点差沿用 fx 的 `spreadBps`（成交时由引擎加入，报价只给 mid）。
+- 任一腿不可用时返回 `errors[]`，不得返回错误方向的价格。
+
+### 6D.3 K 线
+
+- 内置对/金银：沿用现有来源（腾讯日线 / 新浪金银 / 分钟线走 Yahoo）。
+- 合成对：分别取 base 与 quote 的「USD 腿序列」，按时间对齐后逐点相除：
+  - 多/空方向的 OHLC 正确换算：`h = h_base / l_quote`、`l = l_base / h_quote`（价类腿取倒数后再套用）；
+  - 周/月由日线本地聚合；成交量为 0；
+  - 分钟线仅当 Yahoo 可用且该货币对在 Yahoo 有对应代码时提供（`EURJPY=X` 等），否则从 `/api/markets` 的 fx intervals 中缺失。
+- 结果按 `fx:<PAIR>|interval|limit` 缓存（TTL 同其它 fx K 线）。
+
+### 6D.4 其它接口
+
+- `GET /api/fx/currencies` -> `{ currencies:[{code,name,usdPerUnit,updatedAt}] }`（供前端自定义货币对选择器；`usdPerUnit` 为 1 单位该币种值多少 USD）。
+- `GET /api/search?q=eurjpy` 需能命中任意合法货币对；`GET /api/universe?market=fx` 在内置对之外可附「热门交叉盘」，失败时回退内置列表。
+- `fx` 市场所有合约的杠杆上限使用 `leverageCaps.fx`；与币种无关。
+
+---
+
 ## 7. REST API（Lead 在 server.mjs 实现）
 
 所有响应 JSON。错误：HTTP 4xx/5xx + `{ "error": { "code": "XXX", "message": "中文说明" } }`。
@@ -523,7 +579,11 @@ GET  /api/health
    -> { ok, version, uptimeSec, serverTime, sources:[{source,ok,latencyMs,message}] }
 
 GET  /api/markets
-   -> { markets:[{ id, name, currency, tradeable, intervals, sessions:[{start,end,tz}] }] }
+   -> { markets:[{ id, name, currency, tradeable, intervals, sessions:[{start,end,tz}], maxLeverage, mmr, shortable }] }
+   // maxLeverage 为系统允许上限（cn 1 / hk/us 20 / fx 1000 / crypto 500）；账户实际以 leverageCaps 为准
+
+GET  /api/fx/currencies
+   -> { currencies:[{ code, name, usdPerUnit, updatedAt }] }   // 任意币种外汇对选择器用（见 §6D）
 
 GET  /api/quotes?symbols=cn:sh600519,hk:00700
    -> { quotes:[Quote], errors:[{symbol,message}] }
@@ -615,6 +675,9 @@ POST /api/dev/tick -> { ok:true }   // 强制撮合一次（测试用）
 - **状态记忆**：localStorage 单 key `chimatrader.prefs.v1`，至少包含各市场 K 线周期、图表模式、当前标的、账户 id、底部标签页、新手提示开关、引导是否已看、最近查看（≤12）。
 - **新手引导**：首次进入 4 步引导（可跳过/重看），顶栏「帮助」常驻；休市时下单面板要显示市场状态与原因。
 - **标的库**：`GET /api/universe` 提供全市场列表，失败时不得白屏（缓存/自选+持仓兜底 + 提示条）。
+- **杠杆上限（v5）**：账户设置与新建账户里用三个独立滑杆/输入框调整 `leverageCaps.stock`（1–20，港/美股）、`leverageCaps.crypto`（1–500）、`leverageCaps.fx`（1–1000）；**删除倍率滑杆、倍率快捷档、倍率换算预览**。A 股固定 1x 并提示。调整上限时若 mmr 超过 `0.9/上限` 自动夹紧并提示；有持仓/挂单时风险参数锁定（可改名/改费率）。
+- **下单杠杆**：滑杆范围 `1..当前市场有效上限`（cn 恒为 1 且不可做空）；切换标的后上限随市场/账户设置即时变化。
+- **任意币种外汇对（v5）**：外汇市场提供「自定义货币对」入口，选两个币种（USD/EUR/GBP/JPY/AUD/CAD/CHF/NZD/CNY/HKD）生成 `fx:<BASE><QUOTE>`；生成后自动切换标的、加载合成 K 线，可加自选/交易。原有外汇选择器、搜索、标的库继续可用。
 
 ---
 

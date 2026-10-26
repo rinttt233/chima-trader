@@ -16,7 +16,12 @@
   var SEED = params.get('seed') === '1';
   var STORAGE_KEY = 'chimatrader.mock.v2';
 
-  var CNY_PER = { CNY: 1, USD: 7.118, HKD: 0.912, USDT: 7.112 };
+  var CNY_PER = {
+    CNY: 1, USD: 7.118, HKD: 0.912, USDT: 7.112,
+    EUR: 1.08642 * 7.118, GBP: 1.2734 * 7.118, JPY: 0.0066083 * 7.118,
+    AUD: 0.6572 * 7.118, CAD: 0.73303 * 7.118, CHF: 1.13068 * 7.118,
+    NZD: 0.5984 * 7.118
+  };
   var FX_CONVERT_SPREAD = 0.003;
   var CURRENCY = { cn: 'CNY', hk: 'HKD', us: 'USD', fx: 'USD', crypto: 'USDT' };
   var SOURCE = { cn: 'tencent', hk: 'tencent', us: 'yahoo', fx: 'yahoo', crypto: 'binance' };
@@ -38,11 +43,17 @@
     liquidationFeeRate: { cn: 0, hk: 0.002, us: 0.002, fx: 0, crypto: 0.005 }
   };
   var BASE_LEVERAGE = { cn: 1, hk: 10, us: 10, fx: 200, crypto: 100 };
-  var LEVERAGE_CEILING = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125 };
+  var LEVERAGE_CEILING = { cn: 1, hk: 20, us: 20, fx: 1000, crypto: 500 };
   var MAX_LEVERAGE = LEVERAGE_CEILING;
+  var LEVERAGE_CAPS = {
+    keys: ['stock', 'crypto', 'fx'],
+    labels: { stock: '股票（港/美股）', crypto: '加密货币', fx: '外汇' },
+    ranges: { stock: [1, 20], crypto: [1, 500], fx: [1, 1000] },
+    defaults: { stock: 10, crypto: 100, fx: 200 }
+  };
   var ALLOW_SHORT = { cn: false, hk: true, us: true, fx: true, crypto: true };
   var DEFAULT_SETTINGS = {
-    leverageMultiplier: 1,
+    leverageCaps: clone(LEVERAGE_CAPS.defaults),
     fees: clone(FEES),
     slippageBps: clone(SLIPPAGE_BPS),
     margin: clone(MARGIN),
@@ -51,7 +62,6 @@
   };
   var SETTINGS_RANGES = {
     initialCapital: [1000, 1000000000],
-    leverageMultiplier: [0.1, 2],
     fees: {
       commissionRate: [0, 0.005], commissionMin: [0, 500],
       stampDutyRate: [0, 0.005], transferFeeRate: [0, 0.001],
@@ -60,22 +70,22 @@
     },
     slippageBps: [0, 200],
     margin: {
-      mmr: { hk: [0.005, 0.5], us: [0.005, 0.5], fx: [0.0005, 0.1], crypto: [0.0005, 0.1] },
+      mmr: { hk: [0.0005, 0.5], us: [0.0005, 0.5], fx: [0.0001, 0.1], crypto: [0.0001, 0.1] },
       interestAnnual: [0, 0.5], liquidationFeeRate: [0, 0.05]
     },
     fxConvertSpread: [0, 0.02]
   };
   var SETTINGS_PRESETS = {
-    conservative: { leverageMultiplier: 0.1, margin: { mmr: { cn: 1, hk: 0.1, us: 0.1, fx: 0.005, crypto: 0.01 } } },
-    recommended: { leverageMultiplier: 1, margin: { mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 } } },
-    aggressive: { leverageMultiplier: 2, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.002, crypto: 0.004 } } }
+    conservative: { leverageCaps: { stock: 5, crypto: 25, fx: 50 }, margin: { mmr: { cn: 1, hk: 0.1, us: 0.1, fx: 0.005, crypto: 0.01 } } },
+    recommended: { leverageCaps: { stock: 10, crypto: 100, fx: 200 }, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.0005, crypto: 0.001 } } },
+    aggressive: { leverageCaps: { stock: 20, crypto: 500, fx: 1000 }, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.0005, crypto: 0.001 } } }
   };
   var SETTINGS_MARKETS = [
-    { id: 'cn', name: 'A股', currency: 'CNY', baseLeverage: 1, maxLeverageCeiling: 1, shortable: false },
-    { id: 'hk', name: '港股', currency: 'HKD', baseLeverage: 10, maxLeverageCeiling: 20, shortable: true },
-    { id: 'us', name: '美股', currency: 'USD', baseLeverage: 10, maxLeverageCeiling: 20, shortable: true },
-    { id: 'fx', name: '外汇', currency: 'USD', baseLeverage: 200, maxLeverageCeiling: 500, shortable: true },
-    { id: 'crypto', name: '加密', currency: 'USDT', baseLeverage: 100, maxLeverageCeiling: 125, shortable: true }
+    { id: 'cn', name: 'A股', currency: 'CNY', maxLeverageCeiling: 1, shortable: false },
+    { id: 'hk', name: '港股', currency: 'HKD', maxLeverageCeiling: 20, shortable: true },
+    { id: 'us', name: '美股', currency: 'USD', maxLeverageCeiling: 20, shortable: true },
+    { id: 'fx', name: '外汇', currency: 'USD', maxLeverageCeiling: 1000, shortable: true },
+    { id: 'crypto', name: '加密', currency: 'USDT', maxLeverageCeiling: 500, shortable: true }
   ];
 
   var MARKET_META = [
@@ -88,7 +98,7 @@
       ]
     },
     {
-      id: 'hk', name: '港股', currency: 'HKD', tradeable: true, maxLeverage: 4, allowShort: true,
+      id: 'hk', name: '港股', currency: 'HKD', tradeable: true, maxLeverage: 20, allowShort: true,
       intervals: ['1m', '5m', '15m', '30m', '60m', '1d', '1w', '1M'],
       sessions: [
         { start: '09:30', end: '12:00', tz: 'Asia/Hong_Kong' },
@@ -96,12 +106,12 @@
       ]
     },
     {
-      id: 'us', name: '美股', currency: 'USD', tradeable: true, maxLeverage: 4, allowShort: true,
+      id: 'us', name: '美股', currency: 'USD', tradeable: true, maxLeverage: 20, allowShort: true,
       intervals: ['1d', '1w', '1M'],
       sessions: [{ start: '09:30', end: '16:00', tz: 'America/New_York' }]
     },
     {
-      id: 'fx', name: '外汇', currency: 'USD', tradeable: true, maxLeverage: 100, allowShort: true,
+      id: 'fx', name: '外汇', currency: 'USD', tradeable: true, maxLeverage: 1000, allowShort: true,
       intervals: ['1d', '1w', '1M'],
       sessions: [
         { start: '00:00', end: '05:00', tz: 'Asia/Shanghai' },
@@ -109,13 +119,28 @@
       ]
     },
     {
-      id: 'crypto', name: '加密', currency: 'USDT', tradeable: true, maxLeverage: 20, allowShort: true,
+      id: 'crypto', name: '加密', currency: 'USDT', tradeable: true, maxLeverage: 500, allowShort: true,
       intervals: ['1m', '5m', '15m', '30m', '1h', '4h', '1d', '1w'],
       sessions: [{ start: '00:00', end: '24:00', tz: 'Asia/Shanghai' }]
     }
   ];
   var MARKET_MAP = {};
   MARKET_META.forEach(function (m) { MARKET_MAP[m.id] = m; });
+
+  var FX_CURRENCIES = [
+    { code: 'USD', name: '美元', usdPerUnit: 1 },
+    { code: 'EUR', name: '欧元', usdPerUnit: 1.08642 },
+    { code: 'GBP', name: '英镑', usdPerUnit: 1.2734 },
+    { code: 'JPY', name: '日元', usdPerUnit: 0.0066083 },
+    { code: 'AUD', name: '澳元', usdPerUnit: 0.6572 },
+    { code: 'CAD', name: '加元', usdPerUnit: 0.73303 },
+    { code: 'CHF', name: '瑞郎', usdPerUnit: 1.13068 },
+    { code: 'NZD', name: '纽元', usdPerUnit: 0.5984 },
+    { code: 'CNY', name: '人民币', usdPerUnit: 0.140382 },
+    { code: 'HKD', name: '港币', usdPerUnit: 0.128 }
+  ];
+  var FX_CURRENCY_MAP = {};
+  FX_CURRENCIES.forEach(function (currency) { FX_CURRENCY_MAP[currency.code] = currency; });
 
   // symbol, code, name, market, base price, lot size (optional)
   var CATALOG_RAW = [
@@ -324,6 +349,18 @@
 
   var quotes = {};
 
+  function applyFxPairFields(q, item) {
+    if (!q || q.market !== 'fx' || !item || !item.code || item.code.length !== 6) return;
+    var base = item.code.slice(0, 3);
+    var quote = item.code.slice(3);
+    if (!FX_CURRENCY_MAP[base] || !FX_CURRENCY_MAP[quote]) return;
+    q.baseCurrency = base;
+    q.quoteCurrency = quote;
+    q.currency = quote;
+    q.usdPerBase = FX_CURRENCY_MAP[base].usdPerUnit;
+    q.usdPerQuote = FX_CURRENCY_MAP[quote].usdPerUnit;
+  }
+
   function initQuotes() {
     quotes = {};
     CATALOG.forEach(function (item) {
@@ -342,13 +379,82 @@
         source: SOURCE[item.market], extra: {}, _bucket: -1,
         _base: item.base, _lotSize: item.lotSize, _rand: rand
       };
+      applyFxPairFields(q, item);
       q.changePct = q.prevClose ? roundTo((q.change / q.prevClose) * 100, 2) : 0;
       quotes[item.symbol] = q;
     });
   }
 
+  function parseFxPair(symbol) {
+    var match = /^fx:([A-Z]{3})([A-Z]{3})$/i.exec(String(symbol || '').trim());
+    if (!match) return null;
+    var base = match[1].toUpperCase();
+    var quote = match[2].toUpperCase();
+    if (base === quote) return null;
+    if (!FX_CURRENCY_MAP[base] || !FX_CURRENCY_MAP[quote]) return null;
+    return { base: base, quote: quote };
+  }
+
+  function fxPairName(base, quote) {
+    var baseName = (FX_CURRENCY_MAP[base] && FX_CURRENCY_MAP[base].name) || base;
+    var quoteName = (FX_CURRENCY_MAP[quote] && FX_CURRENCY_MAP[quote].name) || quote;
+    return baseName + '/' + quoteName;
+  }
+
+  function ensureFxItem(symbol) {
+    if (CATALOG_MAP[symbol]) return CATALOG_MAP[symbol];
+    var pair = parseFxPair(symbol);
+    if (!pair) return null;
+    var usdPerBase = FX_CURRENCY_MAP[pair.base].usdPerUnit;
+    var usdPerQuote = FX_CURRENCY_MAP[pair.quote].usdPerUnit;
+    var item = {
+      symbol: symbol,
+      code: pair.base + pair.quote,
+      name: fxPairName(pair.base, pair.quote),
+      market: 'fx',
+      base: usdPerBase / usdPerQuote,
+      lotSize: null,
+      baseCurrency: pair.base,
+      quoteCurrency: pair.quote,
+      usdPerBase: usdPerBase,
+      usdPerQuote: usdPerQuote,
+      cross: true
+    };
+    CATALOG_MAP[symbol] = item;
+    return item;
+  }
+
+  function createFxQuote(symbol, item) {
+    var pair = item.baseCurrency && item.quoteCurrency
+      ? { base: item.baseCurrency, quote: item.quoteCurrency }
+      : parseFxPair(symbol);
+    if (!pair) return null;
+    var usdPerBase = item.usdPerBase || FX_CURRENCY_MAP[pair.base].usdPerUnit;
+    var usdPerQuote = item.usdPerQuote || FX_CURRENCY_MAP[pair.quote].usdPerUnit;
+    var basePrice = usdPerBase / usdPerQuote;
+    var digits = priceDigits('fx', basePrice);
+    var rand = mulberry32(hashStr(symbol));
+    var prevClose = roundTo(basePrice * (1 - (rand() - 0.5) * 0.006), digits);
+    var open = roundTo(prevClose * (1 + (rand() - 0.5) * 0.003), digits);
+    var price = roundTo(basePrice, digits);
+    var q = {
+      symbol: symbol, market: 'fx', code: pair.base + pair.quote, name: fxPairName(pair.base, pair.quote),
+      currency: pair.quote, baseCurrency: pair.base, quoteCurrency: pair.quote,
+      usdPerBase: usdPerBase, usdPerQuote: usdPerQuote,
+      price: price, prevClose: prevClose, open: open,
+      high: Math.max(price, open), low: Math.min(price, open),
+      change: roundTo(price - prevClose, digits), changePct: 0,
+      volume: 0, amount: 0, bid: [], ask: [], ts: nowISO(), stale: false,
+      source: 'cross', extra: {}, _bucket: -1, _base: basePrice, _lotSize: null, _rand: rand,
+      _cross: true
+    };
+    q.changePct = q.prevClose ? roundTo((q.change / q.prevClose) * 100, 2) : 0;
+    quotes[symbol] = q;
+    return q;
+  }
+
   function extraFor(q) {
-    var item = CATALOG_MAP[q.symbol];
+    var item = ensureFxItem(q.symbol);
     var extra = { limitUp: null, limitDown: null, lotSize: null, turnoverRate: null, pe: null, pb: null, marketCap: null };
     if (q.market === 'cn') {
       var digits = priceDigits(q.market, q.prevClose);
@@ -372,7 +478,7 @@
     if (q._bucket === bucket) return q;
     q._bucket = bucket;
 
-    var item = CATALOG_MAP[symbol];
+    var item = ensureFxItem(symbol);
     var rand = mulberry32(hashStr(symbol + ':' + bucket));
     var vol = MARKET_VOL[q.market] || 0.01;
     var drift = (rand() - 0.5) * vol * 0.35;
@@ -400,6 +506,15 @@
   }
 
   function quoteState(symbol) {
+    if (!quotes[symbol]) {
+      var item = ensureFxItem(symbol);
+      if (item && item.cross) createFxQuote(symbol, item);
+      else if (item) {
+        // A catalog FX item can be requested before initQuotes; fall back to
+        // the normal catalog quote builder on demand.
+        initQuotes();
+      }
+    }
     var q = quotes[symbol];
     if (!q) return null;
     if (q._bucket === -1) tickQuote(symbol);
@@ -407,7 +522,7 @@
   }
 
   function publicQuote(q) {
-    return {
+    var out = {
       symbol: q.symbol, market: q.market, code: q.code, name: q.name,
       currency: q.currency, price: q.price, prevClose: q.prevClose,
       open: q.open, high: q.high, low: q.low,
@@ -416,9 +531,22 @@
       bid: clone(q.bid), ask: clone(q.ask),
       ts: q.ts, stale: false, source: q.source, extra: clone(q.extra)
     };
+    if (q.market === 'fx' && q.baseCurrency && q.quoteCurrency) {
+      out.baseCurrency = q.baseCurrency;
+      out.quoteCurrency = q.quoteCurrency;
+      out.usdPerBase = q.usdPerBase;
+      out.usdPerQuote = q.usdPerQuote;
+    }
+    return out;
   }
 
   function quoteFor(symbol) {
+    if (!quotes[symbol]) {
+      var item = ensureFxItem(symbol);
+      if (!item) return null;
+      if (item.cross) createFxQuote(symbol, item);
+      else if (!quotes[symbol]) initQuotes();
+    }
     if (!quotes[symbol]) return null;
     tickQuote(symbol);
     return publicQuote(quotes[symbol]);
@@ -492,7 +620,7 @@
   };
 
   function barsFor(symbol, interval, limit) {
-    var item = CATALOG_MAP[symbol];
+    var item = ensureFxItem(symbol);
     if (!item) fail(404, 'UNKNOWN_SYMBOL', '未知标的：' + symbol);
     var meta = MARKET_MAP[item.market];
     if (!meta.intervals.includes(interval)) {
@@ -642,7 +770,7 @@
             ? state.watchlist
             : DEFAULT_WATCHLIST.slice())
             .map(normalizeSymbol)
-            .filter(function (s) { return CATALOG_MAP[s]; });
+            .filter(function (s) { return !!ensureFxItem(s); });
           seq = Math.max(1, Number(state.seq) || 1);
           Object.keys(state.accounts).forEach(function (id) {
             var acc = state.accounts[id];
@@ -716,17 +844,25 @@
     return deepMerge(DEFAULT_SETTINGS, account.settings || {});
   }
 
+  function accountLeverageCaps(settings) {
+    var caps = (settings && settings.leverageCaps) || {};
+    var out = {};
+    LEVERAGE_CAPS.keys.forEach(function (key) {
+      var value = Number(caps[key]);
+      if (!isFinite(value)) value = LEVERAGE_CAPS.defaults[key];
+      var range = LEVERAGE_CAPS.ranges[key];
+      out[key] = Math.min(range[1], Math.max(range[0], Math.round(value)));
+    });
+    return out;
+  }
+
   function accountEffective(account) {
     var settings = accountSettings(account);
-    var multiplier = Number(settings.leverageMultiplier);
-    if (!isFinite(multiplier)) multiplier = 1;
-    var leverage = {};
-    MARKET_ORDER.forEach(function (market) {
-      leverage[market] = market === 'cn' ? 1
-        : Math.min(LEVERAGE_CEILING[market], Math.max(1, Math.round(BASE_LEVERAGE[market] * multiplier)));
-    });
+    var caps = accountLeverageCaps(settings);
+    var leverage = { cn: 1, hk: caps.stock, us: caps.stock, crypto: caps.crypto, fx: caps.fx };
     return {
       leverage: leverage,
+      leverageCaps: caps,
       fees: settings.fees,
       slippageBps: settings.slippageBps,
       margin: settings.margin,
@@ -782,7 +918,15 @@
 
   function validateAccountSettings(input) {
     var settings = deepMerge(DEFAULT_SETTINGS, input || {});
-    checkSettingRange(Number(settings.leverageMultiplier), SETTINGS_RANGES.leverageMultiplier, '杠杆上限倍率');
+    var caps = accountLeverageCaps(settings);
+    LEVERAGE_CAPS.keys.forEach(function (key) {
+      var raw = settings.leverageCaps ? settings.leverageCaps[key] : undefined;
+      var value = Number(raw);
+      var range = LEVERAGE_CAPS.ranges[key];
+      if (raw == null || !isFinite(value) || Math.round(value) !== value || value < range[0] || value > range[1]) {
+        fail(400, 'SETTINGS_INVALID', LEVERAGE_CAPS.labels[key] + '杠杆上限需为 ' + range[0] + '–' + range[1] + ' 的整数');
+      }
+    });
     Object.keys(SETTINGS_RANGES.fees).forEach(function (key) {
       var feeKeys = {
         commissionRate: ['cn', 'hk', 'crypto'], commissionMin: ['cn', 'hk', 'us'],
@@ -803,7 +947,7 @@
     ['hk', 'us', 'fx', 'crypto'].forEach(function (market) {
       var mmr = settings.margin && settings.margin.mmr ? Number(settings.margin.mmr[market]) : NaN;
       checkSettingRange(mmr, SETTINGS_RANGES.margin.mmr[market], market + ' mmr');
-      var lev = Math.min(LEVERAGE_CEILING[market], Math.max(1, Math.round(BASE_LEVERAGE[market] * Number(settings.leverageMultiplier))));
+      var lev = market === 'hk' || market === 'us' ? caps.stock : caps[market];
       if (mmr > 0.9 / lev + 1e-12) fail(400, 'SETTINGS_INVALID', market + ' mmr 需 ≤ 0.9 / ' + lev + 'x');
       checkSettingRange(Number(settings.margin.interestAnnual[market]), SETTINGS_RANGES.margin.interestAnnual, market + ' 利率');
       checkSettingRange(Number(settings.margin.liquidationFeeRate[market]), SETTINGS_RANGES.margin.liquidationFeeRate, market + ' 强平费');
@@ -817,7 +961,7 @@
       markets: clone(SETTINGS_MARKETS),
       ranges: clone(SETTINGS_RANGES),
       presets: clone(SETTINGS_PRESETS),
-      multiplier: { range: [0.1, 2], default: 1, quick: [0.1, 0.25, 0.5, 1, 2] },
+      leverageCaps: clone(LEVERAGE_CAPS),
       defaults: {
         settings: clone(DEFAULT_SETTINGS),
         initialCapital: 1000000,
@@ -841,7 +985,7 @@
 
   function buyingPowerAll(account) {
     var out = {};
-    ['CNY', 'HKD', 'USD', 'USDT'].forEach(function (currency) {
+    ['CNY', 'HKD', 'USD', 'USDT', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD'].forEach(function (currency) {
       out[currency] = buyingPowerFor(account, currency);
     });
     return out;
@@ -1064,7 +1208,7 @@
   // --------------------------------------------------------------- order flow
 
   function validateOrder(account, req) {
-    var item = CATALOG_MAP[req.symbol];
+    var item = ensureFxItem(req.symbol);
     if (!item) fail(400, 'UNKNOWN_SYMBOL', '未知标的：' + req.symbol);
     if (item.code === 'sh000001') fail(400, 'NOT_TRADEABLE', '指数仅用于展示，不可交易');
     var market = item.market;
@@ -1141,7 +1285,7 @@
     if (!close && type === 'market') {
       var fees = calcFees(market, side, qty, estimatePrice, effectiveFeeConfig(account, market)).total;
       var margin = (qty * estimatePrice) / leverage;
-      var currency = CURRENCY[market];
+      var currency = q && q.currency ? q.currency : CURRENCY[market];
       if (leverage > 1) {
         var needCny = (margin + fees) * (CNY_PER[currency] || 1);
         if (needCny > marginAvailableCny(account, CNY_PER) + 1e-6) {
@@ -1168,7 +1312,7 @@
 
   function executeFill(account, order, fillPrice) {
     var market = order.market;
-    var currency = CURRENCY[market];
+    var currency = order.currency || CURRENCY[market];
     var pos = account.positions[order.symbol];
     var trade;
     if (order.close) {
@@ -1251,6 +1395,7 @@
     var validated = validateOrder(account, req);
     var order = {
       id: newOrderId(), symbol: req.symbol, market: validated.item.market, name: validated.item.name,
+      currency: validated.quote && validated.quote.currency ? validated.quote.currency : CURRENCY[validated.item.market],
       side: validated.side, type: validated.type, qty: validated.qty,
       limitPrice: validated.limitPrice, leverage: validated.leverage, close: validated.close,
       takeProfit: validated.takeProfit, stopLoss: validated.stopLoss,
@@ -1596,6 +1741,17 @@
 
     if (pathname === '/api/settings/meta') return settingsMetaPayload();
 
+    if (pathname === '/api/fx/currencies') {
+      return {
+        currencies: FX_CURRENCIES.map(function (currency) {
+          return {
+            code: currency.code, name: currency.name, usdPerUnit: currency.usdPerUnit,
+            updatedAt: nowISO()
+          };
+        })
+      };
+    }
+
     if (pathname === '/api/backup/status') {
       var mockSize = 0;
       try { mockSize = JSON.stringify(state).length; } catch (e) { mockSize = 0; }
@@ -1686,8 +1842,20 @@
         return item.name.toLowerCase().includes(query) ||
           item.code.toLowerCase().includes(query) ||
           item.symbol.toLowerCase().includes(query);
-      }).slice(0, limit).map(function (item) {
-        return { symbol: item.symbol, code: item.code, name: item.name, market: item.market, currency: CURRENCY[item.market] };
+      });
+      var pairMatch = /^([a-z]{3})[\/\- ]?([a-z]{3})$/.exec(query);
+      if (pairMatch) {
+        var pairSymbol = 'fx:' + pairMatch[1].toUpperCase() + pairMatch[2].toUpperCase();
+        var pairItem = pairSymbol.slice(3, 6) !== pairSymbol.slice(6) ? ensureFxItem(pairSymbol) : null;
+        if (pairItem && !results.some(function (item) { return item.symbol === pairSymbol; })) {
+          results.unshift(pairItem);
+        }
+      }
+      results = results.slice(0, limit).map(function (item) {
+        return {
+          symbol: item.symbol, code: item.code, name: item.name, market: item.market,
+          currency: item.quoteCurrency || CURRENCY[item.market]
+        };
       });
       return { results: results };
     }
@@ -1698,7 +1866,7 @@
         var cleaned = body.symbols
           .filter(function (s) { return typeof s === 'string'; })
           .map(normalizeSymbol)
-          .filter(function (s) { return CATALOG_MAP[s]; });
+          .filter(function (s) { return !!ensureFxItem(s); });
         state.watchlist = Array.from(new Set(cleaned));
         saveState();
       }
@@ -1733,10 +1901,10 @@
       var accSettings = getAccount(decodeURIComponent(match[1]));
       var patch = (body && body.settings) || {};
       var locked = hasOpenRisk(accSettings);
-      var touchesRisk = patch.leverageMultiplier != null ||
+      var touchesRisk = patch.leverageCaps != null ||
         (patch.margin && patch.margin.mmr);
       if (locked && touchesRisk) {
-        fail(409, 'SETTINGS_LOCKED', '有持仓或挂单时不能修改杠杆倍率与保证金参数');
+        fail(409, 'SETTINGS_LOCKED', '有持仓或挂单时不能修改杠杆上限与保证金参数');
       }
       var merged = deepMerge(accountSettings(accSettings), patch);
       var validated = validateAccountSettings(merged);
@@ -1794,7 +1962,7 @@
       }
       var newPrice = Number(body.limitPrice);
       if (!isFinite(newPrice) || newPrice <= 0) fail(400, 'PRICE_INVALID', '委托价格无效');
-      var editItem = CATALOG_MAP[editOrder.symbol];
+      var editItem = ensureFxItem(editOrder.symbol);
       if (editItem && editItem.market === 'cn') {
         var editExtra = extraFor(quoteState(editOrder.symbol));
         if (editExtra.limitUp != null && (newPrice > editExtra.limitUp + 1e-9 || newPrice < editExtra.limitDown - 1e-9)) {
@@ -1900,7 +2068,7 @@
     if (pathname === '/api/dev/shock' && method === 'POST') {
       var shockSymbol = normalizeSymbol(body.symbol);
       var shockPct = Number(body.pct);
-      if (!CATALOG_MAP[shockSymbol] || !isFinite(shockPct)) fail(400, 'BAD_REQUEST', '参数无效');
+      if (!ensureFxItem(shockSymbol) || !isFinite(shockPct)) fail(400, 'BAD_REQUEST', '参数无效');
       var shockQuote = quotes[shockSymbol];
       if (shockQuote) {
         var digits = priceDigits(shockQuote.market, shockQuote.price);
@@ -1952,7 +2120,7 @@
 
     if (pathname === '/api/dev/fail-symbol' && method === 'POST') {
       var failSymbol = normalizeSymbol(body.symbol);
-      if (!CATALOG_MAP[failSymbol]) fail(400, 'BAD_REQUEST', '未知标的');
+      if (!ensureFxItem(failSymbol)) fail(400, 'BAD_REQUEST', '未知标的');
       if (!state.mockFailedSymbols) state.mockFailedSymbols = {};
       if (body.failed === false) delete state.mockFailedSymbols[failSymbol];
       else state.mockFailedSymbols[failSymbol] = true;

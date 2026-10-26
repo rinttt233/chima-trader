@@ -13,6 +13,7 @@ import {
   search,
   getUniverse,
   getFxRates,
+  getFxCurrencies,
   getMarkets,
   getMarketMeta,
   health,
@@ -190,11 +191,17 @@ async function main() {
     ['whEURUSD', 'fx:EURUSD'],
     ['fx:fxXAUUSD', 'fx:XAUUSD'],
     ['hf_XAU', 'fx:XAUUSD'],
+    ['fx:EURJPY', 'fx:EURJPY'],
+    ['eurjpy', 'fx:EURJPY'],
+    ['fx:EUR/JPY', 'fx:EURJPY'],
+    ['fx:CADJPY', 'fx:CADJPY'],
+    ['fx:USDHKD', 'fx:USDHKD'],
+    ['fx:CNYJPY', 'fx:CNYJPY'],
     ['crypto:cryptoBTCUSDT', 'crypto:BTCUSDT'],
     ['crypto:BTCUSDT', 'crypto:BTCUSDT'],
     ['BTCUSDT', 'crypto:BTCUSDT'],
   ];
-  await check('规范化 market:code（16 个写法）', async () => {
+  await check(`规范化 market:code（${symbolCases.length} 个写法）`, async () => {
     const bad = [];
     for (const [input, expected] of symbolCases) {
       try {
@@ -208,7 +215,7 @@ async function main() {
     return '全部通过';
   });
   await check('非法代码抛中文错误', async () => {
-    for (const input of ['', 'xx:foo', 'hk:abc', 'fx:EURO']) {
+    for (const input of ['', 'xx:foo', 'hk:abc', 'fx:EURO', 'fx:EUREUR', 'fx:XYZUSD', 'fx:EUR']) {
       let threw = false;
       try {
         parseSymbol(input);
@@ -219,6 +226,21 @@ async function main() {
       assert(threw, `${input || '(空串)'} 未抛错`);
     }
     return '全部抛错';
+  });
+  await check('fx 任意货币对解析字段', async () => {
+    const eurjpy = parseSymbol('fx:EURJPY');
+    assert(eurjpy.baseCurrency === 'EUR' && eurjpy.quoteCurrency === 'JPY', 'EURJPY base/quote 不符');
+    assert(eurjpy.currency === 'JPY', 'EURJPY 币种应为 quote 币种 JPY');
+    assert(eurjpy.name === '欧元/日元', `EURJPY 名称不符：${eurjpy.name}`);
+    const cadjpy = parseSymbol('fx:CADJPY');
+    assert(cadjpy.cross === true, 'CADJPY 应标记为合成对');
+    assert(cadjpy.tencentCode === null, 'CADJPY 不应有腾讯代码');
+    assert(cadjpy.currency === 'JPY' && cadjpy.baseCurrency === 'CAD', 'CADJPY 币种字段不符');
+    const usdhkd = parseSymbol('fx:USDHKD');
+    assert(usdhkd.currency === 'HKD' && usdhkd.quoteCurrency === 'HKD', 'USDHKD quote 币种应为 HKD');
+    const gold = parseSymbol('fx:XAUUSD');
+    assert(gold.baseCurrency === 'XAU' && gold.quoteCurrency === 'USD', 'XAUUSD base/quote 不符');
+    return `EURJPY=${eurjpy.name}；CADJPY cross=${cadjpy.cross}；USDHKD currency=${usdhkd.currency}`;
   });
   console.log('');
 
@@ -288,7 +310,8 @@ async function main() {
         assert(parseSymbol(item.symbol).symbol === item.symbol, `symbol 未规范化：${item.symbol}`);
         assert(typeof item.code === 'string' && item.code.length > 0, 'code 为空');
         assert(typeof item.name === 'string' && item.name.length > 0, `name 为空（${item.symbol}）`);
-        assert(item.currency === UNIVERSE_CURRENCY[market], `currency 不符：${item.currency}`);
+        const expectedCurrency = market === 'fx' ? parseSymbol(item.symbol).currency : UNIVERSE_CURRENCY[market];
+        assert(item.currency === expectedCurrency, `currency 不符：${item.currency}`);
         assert(Number.isFinite(item.price) && item.price > 0, `price 非法：${item.price}`);
         assert(Number.isFinite(item.amount) && item.amount >= 0, `amount 非法：${item.amount}`);
         assert(item.changePct === null || Number.isFinite(item.changePct), `changePct 非法：${item.changePct}`);
@@ -429,6 +452,95 @@ async function main() {
   }, { optional: !tencentOk });
   console.log('');
 
+  // ---- fx v5: arbitrary currency pairs -------------------------------------
+  console.log('== 外汇 v5 任意货币对 (fx pairs) ==');
+  const crossPairs = ['fx:EURJPY', 'fx:USDHKD', 'fx:CNYJPY', 'fx:CADJPY'];
+  const CROSS_EXPECTED = {
+    'fx:EURJPY': ['EUR', 'JPY'],
+    'fx:USDHKD': ['USD', 'HKD'],
+    'fx:CNYJPY': ['CNY', 'JPY'],
+    'fx:CADJPY': ['CAD', 'JPY'],
+  };
+  const crossBatch = await getQuotes(crossPairs);
+  const crossBySymbol = Object.fromEntries(crossBatch.quotes.map((quote) => [quote.symbol, quote]));
+  const validateFxPairQuote = (quote, [baseCurrency, quoteCurrency], { requireCrossSource = false } = {}) => {
+    assert(quote && typeof quote === 'object', '交叉报价不存在');
+    assert(quote.market === 'fx', `市场不符：${quote.market}`);
+    assert(quote.baseCurrency === baseCurrency, `baseCurrency 不符：${quote.baseCurrency}`);
+    assert(quote.quoteCurrency === quoteCurrency, `quoteCurrency 不符：${quote.quoteCurrency}`);
+    assert(quote.currency === quoteCurrency, `currency 应为 quote 币种：${quote.currency}`);
+    assert(typeof quote.name === 'string' && quote.name.includes('/'), `名称异常：${quote.name}`);
+    assert(Number.isFinite(quote.price) && quote.price > 0, `价格非法：${quote.price}`);
+    assert(quote.pairRate === quote.price, 'pairRate 应等于 price');
+    assert(Number.isFinite(quote.usdPerBase) && quote.usdPerBase > 0, `usdPerBase 非法：${quote.usdPerBase}`);
+    assert(Number.isFinite(quote.usdPerQuote) && quote.usdPerQuote > 0, `usdPerQuote 非法：${quote.usdPerQuote}`);
+    const ratio = quote.usdPerBase / quote.usdPerQuote;
+    assert(
+      Math.abs(ratio - quote.price) / quote.price < 1e-3,
+      `usdPerBase/usdPerQuote 与 price 不一致（${ratio} vs ${quote.price}）`,
+    );
+    assert(Array.isArray(quote.bid) && Array.isArray(quote.ask), '盘口应为数组');
+    assert(Number.isFinite(Date.parse(quote.ts)), `时间非法：${quote.ts}`);
+    if (requireCrossSource) assert(quote.source === 'cross', `合成对来源应为 cross：${quote.source}`);
+  };
+  await check('[fx-v5] 交叉报价 EURJPY/USDHKD/CNYJPY/CADJPY', async () => {
+    for (const symbol of crossPairs) {
+      validateFxPairQuote(crossBySymbol[symbol], CROSS_EXPECTED[symbol], { requireCrossSource: true });
+    }
+    return crossPairs.map((symbol) => `${symbol} ${crossBySymbol[symbol].price}`).join('，');
+  }, { optional: !tencentOk || crossBatch.errors.length > 0 });
+  await check('[fx-v5] 内置对 USD 结算字段（EURUSD/USDJPY/金银）', async () => {
+    const result = await getQuotes(['fx:EURUSD', 'fx:USDJPY', 'fx:XAUUSD']);
+    const bySymbol = Object.fromEntries(result.quotes.map((quote) => [quote.symbol, quote]));
+    const eurusd = bySymbol['fx:EURUSD'];
+    assert(eurusd && eurusd.currency === 'USD', 'EURUSD currency 应为 USD');
+    assert(eurusd.usdPerQuote === 1 && Math.abs(eurusd.usdPerBase - eurusd.price) < 1e-6, 'EURUSD usdPerBase 应等于 price');
+    const usdjpy = bySymbol['fx:USDJPY'];
+    assert(usdjpy && usdjpy.currency === 'JPY', 'USDJPY currency 应为 JPY');
+    assert(usdjpy.usdPerBase === 1, 'USDJPY usdPerBase 应为 1');
+    assert(Math.abs(usdjpy.usdPerQuote - 1 / usdjpy.price) < 1e-6, 'USDJPY usdPerQuote 应为 1/price');
+    const gold = bySymbol['fx:XAUUSD'];
+    assert(gold && gold.usdPerBase === gold.price && gold.usdPerQuote === 1, '金银 USD 字段不符');
+    return `EURUSD usdPerBase=${eurusd.usdPerBase}；USDJPY usdPerQuote=${usdjpy.usdPerQuote}；XAU usdPerBase=${gold.usdPerBase}`;
+  }, { optional: !tencentOk });
+  await check('[fx-v5] getFxCurrencies（1 单位币种值多少 USD）', async () => {
+    const currencies = await getFxCurrencies();
+    assert(Array.isArray(currencies) && currencies.length === 10, `币种数量异常：${currencies?.length}`);
+    const byCode = Object.fromEntries(currencies.map((entry) => [entry.code, entry]));
+    for (const code of ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'CAD', 'CHF', 'NZD', 'CNY', 'HKD']) {
+      const entry = byCode[code];
+      assert(entry, `缺少币种 ${code}`);
+      assert(typeof entry.name === 'string' && entry.name.length > 0, `${code} 缺少中文名`);
+      assert(Number.isFinite(entry.usdPerUnit) && entry.usdPerUnit > 0, `${code} usdPerUnit 非法：${entry.usdPerUnit}`);
+      assert(Number.isFinite(Date.parse(entry.updatedAt)), `${code} updatedAt 非法`);
+    }
+    assert(byCode.USD.usdPerUnit === 1, 'USD usdPerUnit 应为 1');
+    assert(byCode.EUR.usdPerUnit > 0.5 && byCode.EUR.usdPerUnit < 2, `EUR 汇率异常：${byCode.EUR.usdPerUnit}`);
+    assert(byCode.JPY.usdPerUnit > 0.001 && byCode.JPY.usdPerUnit < 0.05, `JPY 汇率异常：${byCode.JPY.usdPerUnit}`);
+    assert(byCode.HKD.usdPerUnit > 0.05 && byCode.HKD.usdPerUnit < 0.3, `HKD 汇率异常：${byCode.HKD.usdPerUnit}`);
+    return currencies.map((entry) => `${entry.code}=${entry.usdPerUnit}`).join(' ');
+  }, { optional: !tencentOk });
+  for (const [label, symbol, interval] of [
+    ['EURJPY 日K', 'fx:EURJPY', '1d'],
+    ['EURJPY 周K', 'fx:EURJPY', '1w'],
+    ['USDHKD 日K', 'fx:USDHKD', '1d'],
+    ['CNYJPY 日K', 'fx:CNYJPY', '1d'],
+  ]) {
+    await check(`[fx-v5] 合成 ${label}`, async () => {
+      const result = await getKline(symbol, interval, 20);
+      assert(result.symbol === parseSymbol(symbol).symbol, `symbol 未规范化：${result.symbol}`);
+      validateBars(result.bars, `fx-v5 ${label}`);
+      const last = result.bars[result.bars.length - 1];
+      return `${result.bars.length} 根，最新 ${last.t.slice(0, 10)} 收 ${last.c}`;
+    }, { optional: !tencentOk });
+  }
+  await check('[fx-v5] 合成对分钟线（Yahoo 可用才有）', async () => {
+    const result = await getKline('fx:EURJPY', '5m', 10);
+    validateBars(result.bars, 'fx-v5 EURJPY 5m');
+    return `${result.bars.length} 根，最新 ${result.bars[result.bars.length - 1].t}`;
+  }, { optional: !minuteAvailable });
+  console.log('');
+
   // ---- daily K-lines -------------------------------------------------------
   console.log('== 日/周/月 K 线 ==');
   const dailyCases = [
@@ -489,6 +601,8 @@ async function main() {
     ['[hk] 搜索“腾讯”', '腾讯', 'hk:hk00700', { optional: !tencentOk }],
     ['[us] 搜索“AAPL”', 'AAPL', 'us:usAAPL', { optional: !tencentOk }],
     ['[fx] 搜索“黄金”', '黄金', 'fx:XAUUSD', {}],
+    ['[fx-v5] 搜索“eurjpy”', 'eurjpy', 'fx:EURJPY', {}],
+    ['[fx-v5] 搜索“cad/jpy”', 'cad/jpy', 'fx:CADJPY', {}],
     ['[crypto] 搜索“BTC”', 'BTC', 'crypto:BTCUSDT', {}],
   ];
   for (const [label, query, expected, options] of searchCases) {
@@ -542,6 +656,22 @@ async function main() {
     assert(error.status === 400, '非法 symbol 状态码不为 400');
     return error.message;
   });
+  await check('[fx-v5] 非法货币对返回 SYMBOL_INVALID(400)', async () => {
+    for (const pair of ['fx:EUREUR', 'fx:XYZUSD']) {
+      let error = null;
+      try {
+        await getKline(pair, '1d', 5);
+      } catch (err) {
+        error = err;
+      }
+      assert(error instanceof MarketDataError && error.code === 'SYMBOL_INVALID', `${pair} 未返回 SYMBOL_INVALID`);
+      assert(error.status === 400, `${pair} 状态码 ${error.status}`);
+      assert(/[\u4e00-\u9fff]/.test(error.message), '错误信息不是中文');
+    }
+    const result = await getQuotes(['fx:EUREUR']);
+    assert(result.quotes.length === 0 && result.errors.length === 1, '非法货币对报价应进入 errors');
+    return result.errors[0].message;
+  });
   console.log('');
 
   // ---- proxy off: direct fallbacks -----------------------------------------
@@ -577,6 +707,22 @@ async function main() {
       assert(Number.isFinite(quote.price) && quote.price > 0, `价格非法：${quote.price}`);
     }
     return result.quotes.map((quote) => `${quote.symbol}=${quote.price}`).join('，');
+  });
+  await check('[proxy-off] 交叉汇率（腾讯直连腿）', async () => {
+    const result = await getQuotes(['fx:EURJPY', 'fx:CADJPY', 'fx:USDHKD', 'fx:CNYJPY']);
+    assert(result.quotes.length === 4 && result.errors.length === 0, `交叉报价失败：${JSON.stringify(result.errors)}`);
+    for (const quote of result.quotes) {
+      assert(Number.isFinite(quote.usdPerBase) && quote.usdPerBase > 0, `${quote.symbol} usdPerBase 非法`);
+      assert(Number.isFinite(quote.usdPerQuote) && quote.usdPerQuote > 0, `${quote.symbol} usdPerQuote 非法`);
+      const ratio = quote.usdPerBase / quote.usdPerQuote;
+      assert(Math.abs(ratio - quote.price) / quote.price < 1e-3, `${quote.symbol} 交叉价与 USD 腿不一致`);
+    }
+    return result.quotes.map((quote) => `${quote.symbol}=${quote.price}`).join('，');
+  });
+  await check('[proxy-off] 合成 EURJPY 日K（腾讯直连腿）', async () => {
+    const result = await getKline('fx:EURJPY', '1d', 20);
+    validateBars(result.bars, 'proxy-off EURJPY');
+    return `${result.bars.length} 根`;
   });
   for (const interval of ['1d', '1h', '1m']) {
     await check(`[proxy-off] crypto ${interval} K（data-api.binance.vision）`, async () => {

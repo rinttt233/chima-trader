@@ -57,13 +57,18 @@
     interestAnnual: { cn: 0, hk: 0.06, us: 0.06, fx: 0.03, crypto: 0.08 },
     liquidationFeeRate: { cn: 0, hk: 0.002, us: 0.002, fx: 0, crypto: 0.005 }
   };
-  var MAX_LEVERAGE_FALLBACK = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125 };
+  var MAX_LEVERAGE_FALLBACK = { cn: 1, hk: 20, us: 20, fx: 1000, crypto: 500 };
   var ALLOW_SHORT_FALLBACK = { cn: false, hk: true, us: true, fx: true, crypto: true };
-  var BASE_LEVERAGE_FALLBACK = { cn: 1, hk: 10, us: 10, fx: 200, crypto: 100 };
-  var LEVERAGE_CEILING_FALLBACK = { cn: 1, hk: 20, us: 20, fx: 500, crypto: 125 };
+  var LEVERAGE_CEILING_FALLBACK = { cn: 1, hk: 20, us: 20, fx: 1000, crypto: 500 };
+  var LEVERAGE_CAPS_FALLBACK = {
+    keys: ['stock', 'crypto', 'fx'],
+    labels: { stock: '股票（港/美股）', crypto: '加密货币', fx: '外汇' },
+    shortLabels: { stock: '股票', crypto: '加密', fx: '外汇' },
+    ranges: { stock: [1, 20], crypto: [1, 500], fx: [1, 1000] },
+    defaults: { stock: 10, crypto: 100, fx: 200 }
+  };
   var SETTINGS_RANGES_FALLBACK = {
     initialCapital: [1000, 1000000000],
-    leverageMultiplier: [0.1, 2],
     fees: {
       commissionRate: [0, 0.005], commissionMin: [0, 500],
       stampDutyRate: [0, 0.005], transferFeeRate: [0, 0.001],
@@ -72,15 +77,15 @@
     },
     slippageBps: [0, 200],
     margin: {
-      mmr: { hk: [0.005, 0.5], us: [0.005, 0.5], fx: [0.0005, 0.1], crypto: [0.0005, 0.1] },
+      mmr: { hk: [0.0005, 0.5], us: [0.0005, 0.5], fx: [0.0001, 0.1], crypto: [0.0001, 0.1] },
       interestAnnual: [0, 0.5], liquidationFeeRate: [0, 0.05]
     },
     fxConvertSpread: [0, 0.02]
   };
   var SETTINGS_PRESETS_FALLBACK = {
-    conservative: { leverageMultiplier: 0.1, margin: { mmr: { cn: 1, hk: 0.1, us: 0.1, fx: 0.005, crypto: 0.01 } } },
-    recommended: { leverageMultiplier: 1, margin: { mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 } } },
-    aggressive: { leverageMultiplier: 2, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.002, crypto: 0.004 } } }
+    conservative: { leverageCaps: { stock: 5, crypto: 25, fx: 50 }, margin: { mmr: { cn: 1, hk: 0.1, us: 0.1, fx: 0.005, crypto: 0.01 } } },
+    recommended: { leverageCaps: { stock: 10, crypto: 100, fx: 200 }, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.0005, crypto: 0.001 } } },
+    aggressive: { leverageCaps: { stock: 20, crypto: 500, fx: 1000 }, margin: { mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.0005, crypto: 0.001 } } }
   };
   var ONBOARDING_STEPS = [
     {
@@ -122,6 +127,7 @@
     settingsLocked: false,
     settingsFormDirty: false,
     settingsPreset: null,
+    settingsClampedMarkets: {},
     watchlist: [],
     quotes: {},
     quoteErrors: [],
@@ -133,6 +139,9 @@
     view: null,
     accountEpoch: 0,
     selected: null,
+    fxCurrencies: null,
+    fxCurrenciesAt: 0,
+    fxPairBusy: false,
     interval: null,
     chartMode: 'candles',
     chartBars: [],
@@ -360,11 +369,11 @@
     var fees = cloneDeep(FEE_CONFIG);
     if (!fees.fx.commissionRate) fees.fx.commissionRate = 0;
     var defaults = {
-      leverageMultiplier: 1,
+      leverageCaps: cloneDeep(LEVERAGE_CAPS_FALLBACK.defaults),
       fees: fees,
       slippageBps: cloneDeep(SLIPPAGE_BPS),
       margin: {
-        mmr: { cn: 1, hk: 0.05, us: 0.05, fx: 0.0025, crypto: 0.005 },
+        mmr: { cn: 1, hk: 0.04, us: 0.04, fx: 0.0005, crypto: 0.001 },
         interestAnnual: cloneDeep(MARGIN_CONFIG.interestAnnual),
         liquidationFeeRate: cloneDeep(MARGIN_CONFIG.liquidationFeeRate)
       },
@@ -375,13 +384,13 @@
       markets: ['cn', 'hk', 'us', 'fx', 'crypto'].map(function (id) {
         return {
           id: id, name: MARKET_LABEL[id], currency: { cn: 'CNY', hk: 'HKD', us: 'USD', fx: 'USD', crypto: 'USDT' }[id],
-          baseLeverage: BASE_LEVERAGE_FALLBACK[id], maxLeverageCeiling: LEVERAGE_CEILING_FALLBACK[id],
+          maxLeverageCeiling: LEVERAGE_CEILING_FALLBACK[id],
           shortable: ALLOW_SHORT_FALLBACK[id]
         };
       }),
       ranges: cloneDeep(SETTINGS_RANGES_FALLBACK),
       presets: cloneDeep(SETTINGS_PRESETS_FALLBACK),
-      multiplier: { range: [0.1, 2], default: 1, quick: [0.1, 0.25, 0.5, 1, 2] },
+      leverageCaps: cloneDeep(LEVERAGE_CAPS_FALLBACK),
       defaults: { settings: defaults, initialCapital: 1000000, baseCurrency: 'CNY' }
     };
   }
@@ -394,23 +403,64 @@
     return null;
   }
 
-  function settingsMultiplier() {
-    var meta = settingsMeta();
-    var fallback = meta.multiplier && meta.multiplier.default != null ? meta.multiplier.default : 1;
-    if (state.view && state.view.settings && state.view.settings.leverageMultiplier != null) {
-      return Number(state.view.settings.leverageMultiplier);
-    }
-    return fallback;
+  function leverageCapsMeta() {
+    var meta = settingsMeta().leverageCaps || {};
+    var fallback = LEVERAGE_CAPS_FALLBACK;
+    return {
+      keys: Array.isArray(meta.keys) && meta.keys.length ? meta.keys.slice() : fallback.keys.slice(),
+      labels: mergeDeep(cloneDeep(fallback.labels), meta.labels || {}),
+      shortLabels: mergeDeep(cloneDeep(fallback.shortLabels), meta.shortLabels || {}),
+      ranges: mergeDeep(cloneDeep(fallback.ranges), meta.ranges || {}),
+      defaults: mergeDeep(cloneDeep(fallback.defaults), meta.defaults || {})
+    };
   }
 
-  function multiplierLeverage(market, multiplier) {
-    var info = settingsMarketMeta(market);
-    var base = info && info.baseLeverage != null ? Number(info.baseLeverage) : (BASE_LEVERAGE_FALLBACK[market] || 1);
-    var ceiling = info && info.maxLeverageCeiling != null ? Number(info.maxLeverageCeiling) : (LEVERAGE_CEILING_FALLBACK[market] || 1);
-    var mult = Number(multiplier);
-    if (!isFinite(mult)) mult = 1;
+  function leverageCapsFromSettings(settings) {
+    var meta = leverageCapsMeta();
+    var raw = (settings && settings.leverageCaps) || {};
+    var out = {};
+    meta.keys.forEach(function (key) {
+      var value = Number(raw[key]);
+      if (!isFinite(value)) value = Number(meta.defaults[key]);
+      if (!isFinite(value)) value = 1;
+      out[key] = Math.max(1, Math.round(value));
+    });
+    return out;
+  }
+
+  function leverageCapKeyForMarket(market) {
+    if (market === 'hk' || market === 'us') return 'stock';
+    if (market === 'crypto') return 'crypto';
+    if (market === 'fx') return 'fx';
+    return null;
+  }
+
+  function leverageCapForMarket(market, caps) {
     if (market === 'cn') return 1;
-    return Math.min(ceiling, Math.max(1, Math.round(base * mult)));
+    var key = leverageCapKeyForMarket(market);
+    if (!key) return 1;
+    var meta = leverageCapsMeta();
+    var value = caps && caps[key] != null ? Number(caps[key]) : Number(meta.defaults[key]);
+    if (!isFinite(value) || value < 1) value = 1;
+    return Math.max(1, Math.round(value));
+  }
+
+  function currentViewLeverageCaps() {
+    return leverageCapsFromSettings(state.view && state.view.settings);
+  }
+
+  function effectiveLeverageCaps() {
+    var eff = accountEffective();
+    if (eff && eff.leverage) {
+      var stock = eff.leverage.hk != null ? Number(eff.leverage.hk)
+        : (eff.leverage.us != null ? Number(eff.leverage.us) : null);
+      var crypto = eff.leverage.crypto != null ? Number(eff.leverage.crypto) : null;
+      var fx = eff.leverage.fx != null ? Number(eff.leverage.fx) : null;
+      if (isFinite(stock) && isFinite(crypto) && isFinite(fx)) {
+        return { stock: Math.round(stock), crypto: Math.round(crypto), fx: Math.round(fx) };
+      }
+    }
+    return currentViewLeverageCaps();
   }
 
   function accountEffective() {
@@ -423,15 +473,13 @@
       return Math.max(1, Math.floor(Number(eff.leverage[market]) || 1));
     }
     if (state.view && state.view.settings) {
-      return multiplierLeverage(market, settingsMultiplier());
+      return leverageCapForMarket(market, currentViewLeverageCaps());
     }
     if (!state.view) {
-      var defMult = settingsMeta().multiplier && settingsMeta().multiplier.default != null ? settingsMeta().multiplier.default : 1;
-      return multiplierLeverage(market, defMult);
+      return leverageCapForMarket(market, leverageCapsMeta().defaults);
     }
     var meta = state.markets[market];
-    var value = meta && (meta.maxLeverage != null ? meta.maxLeverage
-      : (meta.leverage && typeof meta.leverage === 'object' ? meta.leverage.max : null));
+    var value = meta && meta.maxLeverage != null ? meta.maxLeverage : null;
     var lev = Number(value);
     if (!isFinite(lev) || lev < 1) lev = MAX_LEVERAGE_FALLBACK[market] || 1;
     return Math.max(1, Math.floor(lev));
@@ -487,31 +535,17 @@
     return MARGIN_CONFIG.interestAnnual[market] || 0;
   }
 
-  function formatMultiplier(value) {
-    var num = Number(value);
-    return isFinite(num) ? fmtNumber(num, 2, 0) : '1';
-  }
-
-  function leverageCapsText(multiplier) {
-    var mult = multiplier == null ? settingsMultiplier() : multiplier;
-    var crypto = multiplierLeverage('crypto', mult);
-    var fx = multiplierLeverage('fx', mult);
-    var hk = multiplierLeverage('hk', mult);
-    var us = multiplierLeverage('us', mult);
-    return '加密 ' + crypto + 'x · 外汇 ' + fx + 'x · ' +
-      (hk === us ? '港美 ' + hk + 'x' : '港股 ' + hk + 'x · 美股 ' + us + 'x');
+  function leverageCapsText(caps) {
+    var value = caps || currentViewLeverageCaps();
+    var meta = leverageCapsMeta();
+    return meta.keys.map(function (key) {
+      return (meta.shortLabels[key] || key) + ' ' + value[key] + 'x';
+    }).join(' · ');
   }
 
   function accountLeverageCapsText() {
-    var eff = accountEffective();
-    if (eff && eff.leverage) {
-      var crypto = eff.leverage.crypto != null ? eff.leverage.crypto : multiplierLeverage('crypto', settingsMultiplier());
-      var fx = eff.leverage.fx != null ? eff.leverage.fx : multiplierLeverage('fx', settingsMultiplier());
-      var hk = eff.leverage.hk != null ? eff.leverage.hk : multiplierLeverage('hk', settingsMultiplier());
-      var us = eff.leverage.us != null ? eff.leverage.us : multiplierLeverage('us', settingsMultiplier());
-      return '加密 ' + crypto + 'x · 外汇 ' + fx + 'x · ' + (hk === us ? '港美 ' + hk + 'x' : '港股 ' + hk + 'x · 美股 ' + us + 'x');
-    }
-    return leverageCapsText(settingsMultiplier());
+    var caps = effectiveLeverageCaps();
+    return leverageCapsText(caps) + ' · A股 1x';
   }
 
   function clampLeverage(market, value) {
@@ -1513,7 +1547,7 @@
     POSITION_NOT_FOUND: '当前标的没有持仓，无法设置保护',
     ORDER_NOT_AMENDABLE: '该委托当前不可改价（仅未成交限价单可改）',
     ORDER_NOT_FOUND: '委托不存在或已成交/撤销',
-    SETTINGS_LOCKED: '有持仓或挂单时不能修改杠杆倍率 / 维持保证金率',
+    SETTINGS_LOCKED: '有持仓或挂单时不能修改杠杆上限 / 维持保证金率',
     SETTINGS_INVALID: '账户参数不合法，请检查数值范围',
     NAME_INVALID: '账户名称需为 1–20 个字符',
     ACCOUNT_NOT_FOUND: '账户不存在'
@@ -1522,10 +1556,10 @@
   function orderErrorMessage(err, market) {
     if (!err) return '下单失败，请稍后重试';
     if (err.code === 'LEVERAGE_NOT_ALLOWED' && market && market !== 'cn') {
-      return '超过当前账户杠杆上限 ' + maxLeverageFor(market) + 'x，可在账户设置里调高倍率';
+      return '超过当前账户杠杆上限 ' + maxLeverageFor(market) + 'x，可在账户设置里调高该市场杠杆上限';
     }
     if (err.code === 'SETTINGS_LOCKED') {
-      return '有持仓或挂单时不能修改杠杆倍率 / 维持保证金率，请先平仓并撤单';
+      return '有持仓或挂单时不能修改杠杆上限 / 维持保证金率，请先平仓并撤单';
     }
     var hint = err.code ? ORDER_ERROR_HINTS[err.code] : null;
     var message = errorText(err);
@@ -1560,7 +1594,12 @@
     if (view.buyingPower && view.buyingPower[currency] != null && isFinite(view.buyingPower[currency])) {
       return Number(view.buyingPower[currency]);
     }
-    return cashOf(currency);
+    var native = cashOf(currency);
+    if (currency === 'CNY' || !autoConvertEnabled()) return native;
+    var rate = fxRateOf(currency);
+    if (!isFinite(rate) || rate <= 0) return native;
+    var converted = cashOf('CNY') * (1 - fxConvertSpread()) / rate;
+    return native + Math.max(0, converted);
   }
 
   function autoConvertEnabled() {
@@ -2442,27 +2481,111 @@
     return num;
   }
 
-  function currentSettingsMultiplier() {
-    var range = $('#settings-mult-range');
-    var value = range ? Number(range.value) : 1;
-    return isFinite(value) ? value : 1;
+  function currentSettingsCaps() {
+    var meta = leverageCapsMeta();
+    var out = {};
+    meta.keys.forEach(function (key) {
+      var input = document.querySelector('#settings-caps [data-cap-key="' + key + '"] [data-cap-input]');
+      var raw = input ? Number(input.value) : NaN;
+      var range = meta.ranges[key] || [1, 1000];
+      if (!isFinite(raw)) raw = Number(meta.defaults[key]);
+      out[key] = Math.min(range[1], Math.max(range[0], Math.round(raw)));
+    });
+    return out;
   }
 
-  function mmrCapFor(market, multiplier) {
+  function capKeyLabel(key) {
+    var meta = leverageCapsMeta();
+    return meta.labels[key] || key;
+  }
+
+  function capShortLabel(key) {
+    var meta = leverageCapsMeta();
+    return meta.shortLabels[key] || key;
+  }
+
+  function capLeverageForCaps(market, caps) {
+    var key = leverageCapKeyForMarket(market);
+    if (!key) return 1;
+    return Math.max(1, Math.round(Number(caps && caps[key]) || 1));
+  }
+
+  function mmrCapForCaps(market, caps) {
     if (market === 'cn') return 1;
-    var lev = multiplierLeverage(market, multiplier);
+    var lev = capLeverageForCaps(market, caps);
     return lev > 0 ? 0.9 / lev : 1;
   }
 
-  function settingsMmrCapsText(multiplier) {
-    var hk = mmrCapFor('hk', multiplier);
-    var us = mmrCapFor('us', multiplier);
-    var fx = mmrCapFor('fx', multiplier);
-    var crypto = mmrCapFor('crypto', multiplier);
-    var hkUs = hk === us
-      ? '港股/美股 ' + formatRatePercent(hk * 100)
-      : '港股 ' + formatRatePercent(hk * 100) + '、美股 ' + formatRatePercent(us * 100);
-    return hkUs + '、外汇 ' + formatRatePercent(fx * 100) + '、加密 ' + formatRatePercent(crypto * 100);
+  function mmrMarketCapText(market, caps) {
+    return formatRatePercent(mmrCapForCaps(market, caps) * 100);
+  }
+
+  function renderSettingsCaps(settings) {
+    var host = $('#settings-caps');
+    if (!host) return;
+    var meta = leverageCapsMeta();
+    var caps = leverageCapsFromSettings(settings);
+    var description = {
+      stock: '港/美股有效上限；A股固定 1x。',
+      crypto: '所有加密货币合约共用此上限。',
+      fx: '所有外汇、贵金属和自定义货币对共用此上限。'
+    };
+    host.innerHTML = meta.keys.map(function (key) {
+      var range = meta.ranges[key] || [1, 1000];
+      var value = caps[key];
+      return '<div class="settings-cap" data-cap-key="' + escapeHtml(key) + '">' +
+        '<div class="settings-cap-head"><span class="settings-cap-label">' + escapeHtml(capKeyLabel(key)) + '杠杆上限</span>' +
+        '<div class="settings-cap-value"><input type="number" data-cap-input min="' + range[0] + '" max="' + range[1] +
+        '" step="1" value="' + value + '" aria-label="' + escapeHtml(capKeyLabel(key)) + '杠杆上限">' +
+        '<span>x</span></div><span class="settings-cap-range">' + range[0] + '–' + range[1] + 'x</span></div>' +
+        '<input type="range" data-cap-range min="' + range[0] + '" max="' + range[1] + '" step="1" value="' + value +
+        '" aria-label="' + escapeHtml(capKeyLabel(key)) + '杠杆上限滑杆">' +
+        '<p class="settings-note">' + escapeHtml(description[key] || '') + '</p></div>';
+    }).join('');
+    updateSettingsCapsUI();
+  }
+
+  function updateSettingsCapsUI() {
+    $$('#settings-caps [data-cap-key]').forEach(function (row) {
+      var input = row.querySelector('[data-cap-input]');
+      var range = row.querySelector('[data-cap-range]');
+      if (!input || !range) return;
+      input.disabled = !!state.settingsLocked;
+      range.disabled = !!state.settingsLocked;
+      row.classList.toggle('is-locked', !!state.settingsLocked);
+    });
+    $$('#settings-presets [data-preset]').forEach(function (btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-preset') === state.settingsPreset);
+    });
+  }
+
+  function setCapInput(key, value, source) {
+    var row = document.querySelector('#settings-caps [data-cap-key="' + key + '"]');
+    if (!row) return;
+    var meta = leverageCapsMeta();
+    var range = meta.ranges[key] || [1, 1000];
+    var num = Number(value);
+    if (!isFinite(num)) return;
+    num = Math.min(range[1], Math.max(range[0], Math.round(num)));
+    var input = row.querySelector('[data-cap-input]');
+    var slider = row.querySelector('[data-cap-range]');
+    if (input && source !== 'input') input.value = String(num);
+    if (slider) slider.value = String(num);
+  }
+
+  function onSettingsCapsChanged() {
+    state.settingsPreset = null;
+    state.settingsFormDirty = true;
+    var caps = currentSettingsCaps();
+    var adjusted = clampMmrToCaps(caps);
+    adjusted.forEach(function (item) { state.settingsClampedMarkets[item.market] = item; });
+    var accumulated = Object.keys(state.settingsClampedMarkets).map(function (market) {
+      return state.settingsClampedMarkets[market];
+    });
+    updateSettingsCapsUI();
+    refreshMmrClampNote(caps, accumulated);
+    validateAllSettingsFields();
+    updateSettingsPresetNote();
   }
 
   function validateSettingsField(input) {
@@ -2481,11 +2604,12 @@
         error = '需在 ' + formatSettingsValue(field, range[0]) + ' – ' + formatSettingsValue(field, range[1]) + ' 之间';
       }
       if (!error && field.path.indexOf('margin.mmr.') === 0 && field.market) {
-        var mult = currentSettingsMultiplier();
-        var cap = mmrCapFor(field.market, mult);
+        var caps = currentSettingsCaps();
+        var cap = mmrCapForCaps(field.market, caps);
         if (value > cap + 1e-12) {
-          error = '当前倍率下最高 ' + formatRatePercent(cap * 100) +
-            '（0.9 ÷ ' + multiplierLeverage(field.market, mult) + 'x）';
+          var capKey = leverageCapKeyForMarket(field.market);
+          error = '当前上限下最高 ' + formatRatePercent(cap * 100) +
+            '（0.9 ÷ ' + capShortLabel(capKey) + '上限 ' + capLeverageForCaps(field.market, caps) + 'x）';
         }
       }
     }
@@ -2508,7 +2632,7 @@
     return errors;
   }
 
-  function clampMmrToMultiplier(multiplier) {
+  function clampMmrToCaps(caps) {
     var adjusted = [];
     ['hk', 'us', 'fx', 'crypto'].forEach(function (market) {
       var path = 'margin.mmr.' + market;
@@ -2516,39 +2640,39 @@
       if (!input || input.disabled) return;
       var field = settingsFieldByPath(path);
       if (!field) return;
-      var cap = mmrCapFor(market, multiplier);
+      var cap = mmrCapForCaps(market, caps);
       var value = settingInputToValue(field, input.value);
       if (isFinite(value) && value > cap + 1e-12) {
         input.value = settingDisplayInputValue(field, cap);
-        adjusted.push(market);
+        adjusted.push({ market: market, cap: cap, lev: capLeverageForCaps(market, caps) });
       }
       validateSettingsField(input);
     });
     return adjusted;
   }
 
-  function refreshMmrClampNote(multiplier, adjusted) {
+  function refreshMmrClampNote(caps, adjusted) {
     var note = $('#settings-mmr-clamp-note');
     if (!note) return;
-    var caps = settingsMmrCapsText(multiplier);
-    if (adjusted && adjusted.length) {
-      var names = adjusted.map(function (market) {
-        return market === 'hk' ? '港股' : market === 'us' ? '美股' : market === 'fx' ? '外汇' : '加密';
-      });
-      note.textContent = '已按倍率把维持保证金率上限调整为 ' + caps + '（自动夹紧：' + names.join('、') + '）';
-    } else {
-      note.textContent = '当前倍率下维持保证金率上限：' + caps;
+    if (!adjusted || !adjusted.length) {
+      note.hidden = true;
+      note.textContent = '';
+      return;
     }
+    var parts = adjusted.map(function (item) {
+      return (item.market === 'hk' ? '港股' : item.market === 'us' ? '美股' : item.market === 'fx' ? '外汇' : '加密') +
+        ' ' + formatRatePercent(item.cap * 100) + '（0.9 ÷ ' + item.lev + 'x）';
+    });
+    note.textContent = '已按上限把维持保证金率夹到 ' + parts.join('、');
     note.hidden = false;
   }
 
-  function onSettingsMultiplierChanged() {
-    state.settingsPreset = null;
-    state.settingsFormDirty = true;
-    var multiplier = currentSettingsMultiplier();
-    var adjusted = clampMmrToMultiplier(multiplier);
-    updateSettingsMultiplierUI();
-    refreshMmrClampNote(multiplier, adjusted);
+  function updateSettingsPresetNote() {
+    var el = $('#settings-preset-note');
+    if (!el) return;
+    var preset = state.settingsPreset;
+    el.textContent = preset === 'conservative' ? '保守' : preset === 'recommended' ? '推荐'
+      : preset === 'aggressive' ? '激进' : '自定义';
   }
 
   function renderSettingsFields(settings) {
@@ -2599,6 +2723,7 @@
 
   function readSettingsForm(base) {
     var out = cloneDeep(base || defaultSettingsDeep());
+    out.leverageCaps = currentSettingsCaps();
     $$('#account-settings-fields [data-setting-path]').forEach(function (input) {
       var path = input.getAttribute('data-setting-path');
       var kind = input.getAttribute('data-kind');
@@ -2630,53 +2755,27 @@
         add(field.label + ' 超出范围（' + formatSettingsValue(field, range[0]) + ' – ' + formatSettingsValue(field, range[1]) + '）');
       }
     });
-    var multRange = (settingsMeta().multiplier && settingsMeta().multiplier.range) || [0.1, 2];
-    if (settings.leverageMultiplier < multRange[0] - 1e-9 || settings.leverageMultiplier > multRange[1] + 1e-9) {
-      add('杠杆上限倍率需在 ' + multRange[0] + '× – ' + multRange[1] + '× 之间');
-    }
+    var capsMeta = leverageCapsMeta();
+    var capsInput = settings.leverageCaps || {};
+    capsMeta.keys.forEach(function (key) {
+      var value = Number(capsInput[key]);
+      var range = capsMeta.ranges[key] || [1, 1000];
+      if (!isFinite(value) || Math.round(value) !== value || value < range[0] || value > range[1]) {
+        add(capKeyLabel(key) + '杠杆上限需为 ' + range[0] + ' – ' + range[1] + ' 的整数');
+      }
+    });
+    var caps = leverageCapsFromSettings(settings);
     ['hk', 'us', 'fx', 'crypto'].forEach(function (market) {
       var mmr = Number(getPath(settings, 'margin.mmr.' + market));
-      var lev = multiplierLeverage(market, settings.leverageMultiplier);
+      var lev = capLeverageForCaps(market, caps);
       var cap = 0.9 / lev;
       if (isFinite(mmr) && mmr > cap + 1e-12) {
         add((market === 'hk' ? '港股' : market === 'us' ? '美股' : market === 'fx' ? '外汇' : '加密') +
-          '维持保证金率过高：当前倍率下需 ≤ ' + formatRatePercent(cap * 100) +
-          '（0.9 ÷ 杠杆上限 ' + lev + 'x）');
+          '维持保证金率过高：当前上限下需 ≤ ' + formatRatePercent(cap * 100) +
+          '（0.9 ÷ ' + capShortLabel(leverageCapKeyForMarket(market)) + '上限 ' + lev + 'x）');
       }
     });
     return errors;
-  }
-
-  function updateSettingsMultiplierUI() {
-    var range = $('#settings-mult-range');
-    var mult = range ? Number(range.value) : 1;
-    if (!isFinite(mult)) mult = 1;
-    var multRange = (settingsMeta().multiplier && settingsMeta().multiplier.range) || [0.1, 2];
-    setText('#settings-mult-value', '×' + formatMultiplier(mult));
-    setText('#settings-mult-range-label', multRange[0] + '× – ' + multRange[1] + '×');
-    setText('#settings-mult-preview', leverageCapsText(mult));
-    var recommended = multiplierLeverage('crypto', 1) + 'x';
-    setText('#settings-mult-note',
-      '推荐 1×：' + leverageCapsText(1) + '；倍率越高，杠杆上限越高，也越容易接近强平线。' +
-      (multiplierLeverage('crypto', mult) === Number(recommended.replace('x', '')) ? '' : ' 风险自担。'));
-    var quick = $('#settings-mult-quick');
-    if (quick) {
-      var values = (settingsMeta().multiplier && settingsMeta().multiplier.quick) || [0.1, 0.25, 0.5, 1, 2];
-      quick.innerHTML = values.map(function (value) {
-        var label = Math.abs(Number(value) - 1) < 1e-9 ? '×1 <em>推荐</em>' : '×' + value;
-        return '<button type="button" data-mult="' + value + '"' + (Math.abs(Number(value) - mult) < 1e-9 ? ' class="active"' : '') + '>' + label + '</button>';
-      }).join('');
-    }
-    $$('#settings-presets [data-preset]').forEach(function (btn) {
-      btn.classList.toggle('active', btn.getAttribute('data-preset') === state.settingsPreset);
-    });
-  }
-
-  function setMultiplierValue(value) {
-    var range = $('#settings-mult-range');
-    if (!range) return;
-    range.value = String(value);
-    onSettingsMultiplierChanged();
   }
 
   function updateSettingsLockUI() {
@@ -2684,24 +2783,24 @@
     if (note) {
       note.hidden = !state.settingsLocked;
       note.textContent = state.settingsLocked
-        ? '有持仓或未成交委托：杠杆倍率与保证金参数已锁定，需先平仓并撤单。手续费、滑点与换汇仍可修改。'
+        ? '有持仓或未成交委托：杠杆上限与保证金参数已锁定，需先平仓并撤单。手续费、滑点与换汇仍可修改。'
         : '';
     }
-    var range = $('#settings-mult-range');
-    if (range) range.disabled = !!state.settingsLocked;
-    $$('#settings-mult-quick button, #settings-presets button').forEach(function (btn) {
+    updateSettingsCapsUI();
+    $$('#settings-presets button').forEach(function (btn) {
       btn.disabled = !!state.settingsLocked;
     });
   }
 
   function setSettingsForm(settings) {
     state.settingsFormDirty = false;
-    var range = $('#settings-mult-range');
-    if (range) range.value = String(settings.leverageMultiplier != null ? settings.leverageMultiplier : 1);
-    updateSettingsMultiplierUI();
+    state.settingsClampedMarkets = {};
+    renderSettingsCaps(settings);
     renderSettingsFields(settings);
     updateSettingsLockUI();
+    updateSettingsCapsUI();
     validateAllSettingsFields();
+    updateSettingsPresetNote();
   }
 
   function applySettingsPreset(name) {
@@ -2711,41 +2810,40 @@
     state.settingsPreset = name;
     state.settingsFormDirty = true;
     var current = readSettingsForm(defaultSettingsDeep());
-    current.leverageMultiplier = preset.leverageMultiplier != null ? preset.leverageMultiplier : current.leverageMultiplier;
+    if (preset.leverageCaps) {
+      current.leverageCaps = mergeDeep(current.leverageCaps || {}, preset.leverageCaps);
+    }
     if (preset.margin && preset.margin.mmr) {
       Object.keys(preset.margin.mmr).forEach(function (market) {
         setPath(current, 'margin.mmr.' + market, preset.margin.mmr[market]);
       });
     }
     setSettingsForm(current);
-    var adjusted = clampMmrToMultiplier(current.leverageMultiplier);
-    updateSettingsMultiplierUI();
-    refreshMmrClampNote(current.leverageMultiplier, adjusted);
+    var caps = leverageCapsFromSettings(current);
+    var adjusted = clampMmrToCaps(caps);
+    refreshMmrClampNote(caps, adjusted);
+    updateSettingsPresetNote();
   }
 
   function resetSettingsToDefaults() {
-    var multiplier = currentSettingsMultiplier();
     if (state.settingsLocked) {
-      // Fees / slippage / conversion are still editable even with positions.
       var current = readSettingsForm(mergeDeep(defaultSettingsDeep(), state.view.settings || {}));
-      current.leverageMultiplier = multiplier;
       var defaults = defaultSettingsDeep();
       ['fees', 'slippageBps', 'autoConvert', 'fxConvertSpread'].forEach(function (key) {
         current[key] = cloneDeep(defaults[key]);
       });
+      state.settingsPreset = null;
       setSettingsForm(current);
-      state.settingsPreset = multiplier === 1 ? 'recommended' : null;
-      updateSettingsMultiplierUI();
-      refreshMmrClampNote(multiplier, []);
+      refreshMmrClampNote(leverageCapsFromSettings(current), []);
       return;
     }
     var reset = defaultSettingsDeep();
-    reset.leverageMultiplier = multiplier;
+    state.settingsPreset = 'recommended';
     setSettingsForm(reset);
-    state.settingsPreset = multiplier === 1 ? 'recommended' : null;
-    var adjusted = clampMmrToMultiplier(multiplier);
-    updateSettingsMultiplierUI();
-    refreshMmrClampNote(multiplier, adjusted);
+    var caps = leverageCapsFromSettings(reset);
+    var adjusted = clampMmrToCaps(caps);
+    refreshMmrClampNote(caps, adjusted);
+    updateSettingsPresetNote();
   }
 
   function renderSettingsPresets() {
@@ -2757,7 +2855,8 @@
       if (!presets[key]) return '';
       return '<button type="button" data-preset="' + key + '">' + labels[key] + '</button>';
     }).join('') + '<span class="settings-preset-note" id="settings-preset-note">自定义</span>';
-    updateSettingsMultiplierUI();
+    updateSettingsCapsUI();
+    updateSettingsPresetNote();
   }
 
   function setBasicAccountFieldsEnabled(enabled, allowName) {
@@ -2797,7 +2896,7 @@
     var clampNote = $('#settings-mmr-clamp-note');
     if (clampNote) clampNote.hidden = true;
     setText('#modal-account-title', '账户设置');
-    setText('#account-modal-hint', '调整账户「' + (account.name || '') + '」的杠杆倍率、费率、滑点与保证金参数；仅影响之后的成交与风控计算。');
+    setText('#account-modal-hint', '调整账户「' + (account.name || '') + '」的杠杆上限、费率、滑点与保证金参数；仅影响之后的成交与风控计算。');
     setText('#btn-create-account', '保存设置');
     var nameInput = $('#new-account-name');
     var capitalInput = $('#new-account-capital');
@@ -2832,7 +2931,7 @@
     if (clampNote) clampNote.hidden = true;
     setText('#account-modal-hint', required
       ? '欢迎使用 千亦所 ChimaTrader。请先创建一个模拟账户，所有交易均使用虚拟资金。'
-      : '创建一个新的模拟账户，可自定义费率、滑点、保证金与杠杆上限倍率。');
+      : '创建一个新的模拟账户，可自定义费率、滑点、保证金与股票/加密/外汇杠杆上限。');
     setText('#modal-account-title', required ? '创建模拟账户' : '新建模拟账户');
     setText('#btn-create-account', '创建账户');
     var metaDefaults = settingsMeta().defaults || {};
@@ -2854,7 +2953,7 @@
     renderSettingsPresets();
     setSettingsForm(defaultSettingsDeep());
     state.settingsPreset = 'recommended';
-    updateSettingsMultiplierUI();
+    updateSettingsPresetNote();
     if (nameInput) setTimeout(function () { nameInput.focus(); }, 40);
   }
 
@@ -2897,10 +2996,8 @@
     } else if (name.length > 20) {
       errors.push('账户名称需为 1–20 个字符');
     }
-    var multiplier = currentSettingsMultiplier();
     var base = createMode ? defaultSettingsDeep() : mergeDeep(defaultSettingsDeep(), state.view.settings || {});
     var draft = readSettingsForm(base);
-    draft.leverageMultiplier = multiplier;
     settingsValidate(draft).forEach(function (message) {
       if (errors.indexOf(message) < 0) errors.push(message);
     });
@@ -2979,7 +3076,7 @@
       var message;
       if (err && err.code === 'SETTINGS_INVALID') message = errorText(err);
       else if (err && err.code === 'NAME_INVALID') message = '账户名称需为 1–20 个字符' + (errorText(err) ? '（' + errorText(err) + '）' : '');
-      else if (err && err.code === 'SETTINGS_LOCKED') message = '有持仓或挂单时不能修改杠杆倍率 / 保证金参数，请先平仓并撤单';
+      else if (err && err.code === 'SETTINGS_LOCKED') message = '有持仓或挂单时不能修改杠杆上限 / 保证金参数，请先平仓并撤单';
       else message = orderErrorMessage(err);
       // Backend may return a multi-line SETTINGS_INVALID message for every bad
       // field; keep the modal open and show the complete text.
@@ -3443,6 +3540,137 @@
     return defaultIntervalFor(market);
   }
 
+  function updateCustomFxEntry() {
+    var btn = $('#btn-custom-fx');
+    if (!btn) return;
+    btn.hidden = marketOf(state.selected) !== 'fx';
+  }
+
+  var FX_CURRENCY_NAMES = {
+    USD: '美元', EUR: '欧元', GBP: '英镑', JPY: '日元', AUD: '澳元',
+    CAD: '加元', CHF: '瑞郎', NZD: '纽元', CNY: '人民币', HKD: '港币'
+  };
+
+  async function loadFxCurrencies(force) {
+    if (!force && state.fxCurrencies && Date.now() - state.fxCurrenciesAt < 60000) return state.fxCurrencies;
+    try {
+      var res = await api('/api/fx/currencies');
+      var list = res && Array.isArray(res.currencies) ? res.currencies : [];
+      state.fxCurrencies = list;
+      state.fxCurrenciesAt = Date.now();
+      return list;
+    } catch (err) {
+      state.fxCurrencies = null;
+      throw err;
+    }
+  }
+
+  function currencyDisplayName(code) {
+    if (!state.fxCurrencies) return code;
+    for (var i = 0; i < state.fxCurrencies.length; i++) {
+      if (state.fxCurrencies[i].code === code) return state.fxCurrencies[i].name || FX_CURRENCY_NAMES[code] || code;
+    }
+    return FX_CURRENCY_NAMES[code] || code;
+  }
+
+  function renderFxPairSelects() {
+    var baseSel = $('#fx-base-select');
+    var quoteSel = $('#fx-quote-select');
+    if (!baseSel || !quoteSel) return;
+    var list = state.fxCurrencies || [];
+    var options = list.map(function (currency) {
+      var name = currency.name || FX_CURRENCY_NAMES[currency.code] || '';
+      return '<option value="' + escapeHtml(currency.code) + '">' + escapeHtml(currency.code + ' ' + name) + '</option>';
+    }).join('');
+    var previousBase = baseSel.value || 'EUR';
+    var previousQuote = quoteSel.value || 'JPY';
+    baseSel.innerHTML = options;
+    quoteSel.innerHTML = options;
+    if (list.some(function (c) { return c.code === previousBase; })) baseSel.value = previousBase;
+    if (list.some(function (c) { return c.code === previousQuote; })) quoteSel.value = previousQuote;
+    if (baseSel.value === quoteSel.value) {
+      var other = list.find(function (c) { return c.code !== baseSel.value; });
+      if (other) quoteSel.value = other.code;
+    }
+    updateFxPairPreview();
+  }
+
+  function updateFxPairPreview() {
+    var baseSel = $('#fx-base-select');
+    var quoteSel = $('#fx-quote-select');
+    if (!baseSel || !quoteSel) return;
+    var base = baseSel.value;
+    var quote = quoteSel.value;
+    var preview = $('#fx-pair-preview');
+    if (!preview) return;
+    if (!base || !quote || base === quote) {
+      preview.textContent = '请选择两个不同币种。';
+    } else {
+      preview.textContent = base + '/' + quote + ' · ' + currencyDisplayName(base) + '/' + currencyDisplayName(quote) +
+        ' → fx:' + base + quote;
+    }
+  }
+
+  async function openFxPairModal() {
+    hideFormError('#fx-pair-error');
+    openModal('modal-fx-pair');
+    var preview = $('#fx-pair-preview');
+    if (preview) preview.textContent = '正在加载币种…';
+    try {
+      await loadFxCurrencies(true);
+      renderFxPairSelects();
+    } catch (err) {
+      showFormError('#fx-pair-error', '币种列表加载失败：' + errorText(err));
+      if (preview) preview.textContent = '--';
+    }
+  }
+
+  function swapFxPairCurrencies() {
+    var baseSel = $('#fx-base-select');
+    var quoteSel = $('#fx-quote-select');
+    if (!baseSel || !quoteSel) return;
+    var base = baseSel.value;
+    baseSel.value = quoteSel.value;
+    quoteSel.value = base;
+    updateFxPairPreview();
+  }
+
+  async function submitCustomFxPair() {
+    var baseSel = $('#fx-base-select');
+    var quoteSel = $('#fx-quote-select');
+    if (!baseSel || !quoteSel || state.fxPairBusy) return;
+    var base = baseSel.value;
+    var quote = quoteSel.value;
+    if (!base || !quote) {
+      showFormError('#fx-pair-error', '请选择基础货币和计价货币');
+      return;
+    }
+    if (base === quote) {
+      showFormError('#fx-pair-error', '基础货币和计价货币不能相同');
+      return;
+    }
+    var symbol = normalizeSymbol('fx:' + base + quote);
+    var btn = $('#btn-fx-generate');
+    state.fxPairBusy = true;
+    if (btn) btn.disabled = true;
+    hideFormError('#fx-pair-error');
+    try {
+      try {
+        await addToWatchlist(symbol);
+      } catch (err) {
+        showToast('加入自选失败，仍会打开该货币对：' + errorText(err), 'warn');
+      }
+      await selectSymbol(symbol);
+      closeModal('modal-fx-pair');
+      showToast('已生成 ' + base + '/' + quote + ' · ' + currencyDisplayName(base) + '/' + currencyDisplayName(quote), 'success');
+    } catch (err) {
+      showFormError('#fx-pair-error', '生成货币对失败：' + errorText(err));
+    } finally {
+      state.fxPairBusy = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
   async function selectSymbol(symbol) {
     if (!symbol) return;
     symbol = normalizeSymbol(symbol);
@@ -3739,13 +3967,14 @@
   }
 
   function leverageQuickValues(max) {
-    var values = [1, 2, 5, 10, max];
+    var values = [1, 2, 5, 10, 20, 50, 100, max];
     var out = [];
     values.forEach(function (value) {
       var lev = Math.min(max, Math.max(1, Math.round(value)));
-      if (out.indexOf(lev) < 0) out.push(lev);
+      if (lev <= max && out.indexOf(lev) < 0) out.push(lev);
     });
-    return out.slice(0, 5);
+    if (out[out.length - 1] !== max) out.push(max);
+    return out;
   }
 
   function renderLeverageBlock() {
@@ -3758,14 +3987,13 @@
       ? (Number(pos.leverage) || 1)
       : (state.orderAction === 'close' ? leverageForCurrent() : clampLeverage(market, state.leverage));
     state.leverage = leverage;
-    var locked = market === 'cn' || !!pos;
+    var locked = market === 'cn' || !!pos || max <= 1;
     block.classList.toggle('is-disabled', locked);
     setText('#leverage-value', leverage + 'x');
     if (market === 'cn') {
-      setText('#leverage-max', 'A股恒 1x');
+      setText('#leverage-max', 'A股固定 1x');
     } else {
-      var recommended = multiplierLeverage(market, (settingsMeta().presets && settingsMeta().presets.recommended && settingsMeta().presets.recommended.leverageMultiplier) || 1);
-      setText('#leverage-max', '账户上限 ' + max + 'x · 推荐 ' + recommended + 'x');
+      setText('#leverage-max', '账户上限 ' + max + 'x');
     }
     var range = $('#leverage-range');
     if (range) {
@@ -3790,13 +4018,16 @@
     var text = '';
     var warn = false;
     if (market === 'cn') {
-      text = 'A股不支持杠杆（恒 1x），也不能开空。';
+      text = 'A股不支持杠杆（固定 1x），也不能开空。';
       warn = true;
     } else if (pos) {
       text = '当前持仓杠杆 ' + (pos.leverage || 1) + 'x，加仓/平仓沿用该杠杆。';
       warn = true;
     } else if (state.orderAction === 'close') {
       text = '平仓沿用持仓杠杆，不产生新的保证金。';
+    } else if (max <= 1) {
+      text = '当前账户该市场杠杆上限为 1x，仅能现货交易。';
+      warn = true;
     } else if (leverage > 1) {
       text = '杠杆放大盈亏，借入部分按年化 ' + fmtNumber(interestAnnualFor(market) * 100, 1, 0) + '% 计息，注意强平风险。';
       warn = true;
@@ -4100,7 +4331,7 @@
       : (pos ? (Number(pos.leverage) || 1) : leverForOrder());
     if (!isClose) {
       if (market === 'cn' && leverage > 1) return { ok: false, message: 'A股不支持杠杆（恒 1x）' };
-      if (leverage > maxLev + 1e-9) return { ok: false, message: '超过当前账户杠杆上限 ' + maxLev + 'x，可在账户设置里调高倍率' };
+      if (leverage > maxLev + 1e-9) return { ok: false, message: '超过当前账户杠杆上限 ' + maxLev + 'x，可在账户设置里调高该市场杠杆上限' };
       if (pos) {
         var posSide = positionSide(pos);
         var wantSide = action === 'long' ? 'long' : 'short';
@@ -4682,11 +4913,10 @@
       badge.textContent = mode === 'cross' ? '全仓' : '逐仓';
       badge.classList.toggle('is-cross', mode === 'cross');
     }
-    var multiplier = settingsMultiplier();
     var multBadge = $('#account-multiplier-badge');
     if (multBadge) {
-      multBadge.textContent = '倍率 ×' + formatMultiplier(multiplier);
-      multBadge.title = '账户杠杆上限倍率 ×' + multiplier + '\n' + accountLeverageCapsText();
+      multBadge.textContent = '杠杆上限';
+      multBadge.title = '账户杠杆上限\n' + accountLeverageCapsText();
     }
     setText('#account-leverage-caps', accountLeverageCapsText());
     var positions = view.positions || [];
@@ -5115,6 +5345,7 @@
       return '<button type="button" class="seg' + (interval === state.interval ? ' active' : '') +
         '" data-interval="' + escapeHtml(interval) + '">' + escapeHtml(interval) + '</button>';
     }).join('');
+    updateCustomFxEntry();
   }
 
   function renderChartModeButtons() {
@@ -5810,14 +6041,30 @@
       var btn = event.target.closest('[data-preset]');
       if (btn) applySettingsPreset(btn.getAttribute('data-preset'));
     });
-    on($('#settings-mult-range'), 'input', function () {
-      onSettingsMultiplierChanged();
+    on($('#settings-caps'), 'input', function (event) {
+      var row = event.target.closest('[data-cap-key]');
+      if (!row) return;
+      var key = row.getAttribute('data-cap-key');
+      if (event.target.matches('[data-cap-range]')) {
+        setCapInput(key, event.target.value, 'range');
+      } else if (event.target.matches('[data-cap-input]')) {
+        if (event.target.value === '') return;
+        setCapInput(key, event.target.value, 'input');
+      } else {
+        return;
+      }
+      onSettingsCapsChanged();
     });
-    on($('#settings-mult-quick'), 'click', function (event) {
-      var btn = event.target.closest('[data-mult]');
-      if (!btn || btn.disabled) return;
-      state.settingsFormDirty = true;
-      setMultiplierValue(Number(btn.getAttribute('data-mult')));
+    on($('#settings-caps'), 'change', function (event) {
+      var row = event.target.closest('[data-cap-key]');
+      if (!row || !event.target.matches('[data-cap-input]')) return;
+      var key = row.getAttribute('data-cap-key');
+      if (event.target.value === '') {
+        event.target.value = String(currentSettingsCaps()[key]);
+      } else {
+        setCapInput(key, event.target.value, 'change');
+      }
+      onSettingsCapsChanged();
     });
     on($('#btn-settings-reset-all'), 'click', resetSettingsToDefaults);
     on($('#account-settings-fields'), 'input', function (event) {
@@ -5825,7 +6072,7 @@
       if (input) validateSettingsField(input);
       state.settingsPreset = null;
       state.settingsFormDirty = true;
-      updateSettingsMultiplierUI();
+      updateSettingsPresetNote();
     });
     on($('#account-settings-fields'), 'click', function (event) {
       var btn = event.target.closest('[data-setting-reset]');
@@ -5837,18 +6084,19 @@
       var value = getPath(defaultSettingsDeep(), path);
       var adjusted = [];
       if (path.indexOf('margin.mmr.') === 0 && field.market) {
-        var cap = mmrCapFor(field.market, currentSettingsMultiplier());
+        var caps = currentSettingsCaps();
+        var cap = mmrCapForCaps(field.market, caps);
         if (Number(value) > cap + 1e-12) {
           value = cap;
-          adjusted.push(field.market);
+          adjusted.push({ market: field.market, cap: cap, lev: capLeverageForCaps(field.market, caps) });
         }
       }
       input.value = settingDisplayInputValue(field, value);
       validateSettingsField(input);
       state.settingsPreset = null;
       state.settingsFormDirty = true;
-      updateSettingsMultiplierUI();
-      if (adjusted.length) refreshMmrClampNote(currentSettingsMultiplier(), adjusted);
+      updateSettingsPresetNote();
+      if (adjusted.length) refreshMmrClampNote(currentSettingsCaps(), adjusted);
     });
     on($('#new-account-capital'), 'keydown', function (event) {
       if (event.key === 'Enter') submitAccountSettings();
@@ -5947,6 +6195,11 @@
     });
     on($('#btn-refresh-watch'), 'click', pollNow);
     on($('#btn-chart-refresh'), 'click', function () { loadChart(); });
+    on($('#btn-custom-fx'), 'click', openFxPairModal);
+    on($('#fx-swap'), 'click', swapFxPairCurrencies);
+    on($('#fx-base-select'), 'change', updateFxPairPreview);
+    on($('#fx-quote-select'), 'change', updateFxPairPreview);
+    on($('#btn-fx-generate'), 'click', submitCustomFxPair);
     on($('#conn-box'), 'click', openSourcesModal);
     on($('#conn-box'), 'keydown', function (event) {
       if (event.key === 'Enter' || event.key === ' ') {
@@ -6038,6 +6291,7 @@
       if (!$('#modal-margin-mode').hidden) { closeModal('modal-margin-mode'); return; }
       if (!$('#modal-import').hidden) { closeModal('modal-import'); return; }
       if (!$('#modal-data').hidden) { closeModal('modal-data'); return; }
+      if (!$('#modal-fx-pair').hidden) { closeModal('modal-fx-pair'); return; }
       if (!$('#modal-sources').hidden) { closeModal('modal-sources'); return; }
       if (!$('#modal-help').hidden) { closeModal('modal-help'); return; }
       closeSearch();

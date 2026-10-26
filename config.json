@@ -86,20 +86,13 @@
     "fx": 0.01,
     "crypto": 0.0001
   },
-  "leverage": {
-    "cn": 1,
-    "hk": 10,
-    "us": 10,
-    "fx": 200,
-    "crypto": 100
-  },
   "margin": {
     "mmr": {
       "cn": 1,
-      "hk": 0.05,
-      "us": 0.05,
-      "fx": 0.0025,
-      "crypto": 0.005
+      "hk": 0.04,
+      "us": 0.04,
+      "fx": 0.0005,
+      "crypto": 0.001
     },
     "interestAnnual": {
       "cn": 0,
@@ -123,10 +116,6 @@
       "initialCapital": [
         1000,
         1000000000
-      ],
-      "leverageMultiplier": [
-        0.1,
-        2
       ],
       "fees": {
         "commissionRate": [
@@ -173,19 +162,19 @@
       "margin": {
         "mmr": {
           "hk": [
-            0.005,
+            0.0005,
             0.5
           ],
           "us": [
-            0.005,
+            0.0005,
             0.5
           ],
           "fx": [
-            0.0005,
+            0.0001,
             0.1
           ],
           "crypto": [
-            0.0005,
+            0.0001,
             0.1
           ]
         },
@@ -201,42 +190,45 @@
       "fxConvertSpread": [
         0,
         0.02
-      ]
-    },
-    "leverageCeiling": {
-      "cn": 1,
-      "hk": 20,
-      "us": 20,
-      "fx": 500,
-      "crypto": 125
+      ],
+      "leverageCaps": {
+        "stock": [
+          1,
+          20
+        ],
+        "crypto": [
+          1,
+          500
+        ],
+        "fx": [
+          1,
+          1000
+        ]
+      }
     },
     "presets": {
       "conservative": {
-        "leverageMultiplier": 0.1,
+        "leverageCaps": {
+          "stock": 5,
+          "crypto": 25,
+          "fx": 50
+        },
         "margin": {
           "mmr": {
             "cn": 1,
-            "hk": 0.1,
-            "us": 0.1,
-            "fx": 0.005,
-            "crypto": 0.01
+            "hk": 0.08,
+            "us": 0.08,
+            "fx": 0.01,
+            "crypto": 0.02
           }
         }
       },
       "recommended": {
-        "leverageMultiplier": 1,
-        "margin": {
-          "mmr": {
-            "cn": 1,
-            "hk": 0.05,
-            "us": 0.05,
-            "fx": 0.0025,
-            "crypto": 0.005
-          }
-        }
-      },
-      "aggressive": {
-        "leverageMultiplier": 2,
+        "leverageCaps": {
+          "stock": 10,
+          "crypto": 100,
+          "fx": 200
+        },
         "margin": {
           "mmr": {
             "cn": 1,
@@ -246,7 +238,28 @@
             "crypto": 0.004
           }
         }
+      },
+      "aggressive": {
+        "leverageCaps": {
+          "stock": 20,
+          "crypto": 500,
+          "fx": 1000
+        },
+        "margin": {
+          "mmr": {
+            "cn": 1,
+            "hk": 0.045,
+            "us": 0.045,
+            "fx": 0.0009,
+            "crypto": 0.0018
+          }
+        }
       }
+    },
+    "leverageCaps": {
+      "stock": 10,
+      "crypto": 100,
+      "fx": 200
     }
   },
   "sessions": {

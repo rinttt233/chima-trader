@@ -180,15 +180,15 @@ async function main() {
     check('account name length is validated', renameBad.status === 400 && renameBad.body?.error?.code === 'NAME_INVALID',
       `status=${renameBad.status}`);
 
-    const multiplierTooHigh = await api(`/api/accounts/${accountId}/settings`, {
+    const capTooHigh = await api(`/api/accounts/${accountId}/settings`, {
       method: 'PATCH',
-      body: JSON.stringify({ settings: { leverageMultiplier: 2 } }),
+      body: JSON.stringify({ settings: { leverageCaps: { stock: 21 } } }),
     });
-    check('invalid margin settings explain the limit',
-      multiplierTooHigh.status === 400
-        && multiplierTooHigh.body?.error?.code === 'SETTINGS_INVALID'
-        && String(multiplierTooHigh.body?.error?.message || '').includes('最高'),
-      String(multiplierTooHigh.body?.error?.message || '').slice(0, 80));
+    check('invalid leverage cap is rejected with a readable message',
+      capTooHigh.status === 400
+        && capTooHigh.body?.error?.code === 'SETTINGS_INVALID'
+        && /leverageCaps\.stock/.test(String(capTooHigh.body?.error?.message || '')),
+      String(capTooHigh.body?.error?.message || '').slice(0, 80));
 
     const snapshot = await api(`/api/accounts/${accountId}`);
     check('GET /api/accounts/:id snapshot has cash/equity',
@@ -331,14 +331,17 @@ async function main() {
       console.log('WARN  加密行情不可用，跳过杠杆/保证金冒烟');
     }
 
-    // ---- v3 account-level settings / leverage multiplier --------------------
+    // ---- v5 account-level leverage caps (three independent ceilings) --------
     const settingsMeta = await api('/api/settings/meta');
-    check('GET /api/settings/meta exposes presets, ranges and multiplier',
+    check('GET /api/settings/meta exposes leverage cap ranges and presets',
       settingsMeta.status === 200
+        && !!settingsMeta.body?.leverageCaps?.ranges?.stock
+        && settingsMeta.body?.leverageCaps?.ranges?.stock?.[1] === 20
+        && settingsMeta.body?.leverageCaps?.ranges?.crypto?.[1] === 500
+        && settingsMeta.body?.leverageCaps?.ranges?.fx?.[1] === 1000
         && !!settingsMeta.body?.presets?.recommended
-        && Array.isArray(settingsMeta.body?.multiplier?.quick)
         && Array.isArray(settingsMeta.body?.markets),
-      `presets=${Object.keys(settingsMeta.body?.presets || {}).length} quick=${settingsMeta.body?.multiplier?.quick}`);
+      `ranges=${JSON.stringify(settingsMeta.body?.leverageCaps?.ranges)}`);
 
     const paramAccount = await api('/api/accounts', {
       method: 'POST',
@@ -346,30 +349,54 @@ async function main() {
         name: '参数测试账户',
         initialCapital: 200000,
         settings: {
-          leverageMultiplier: 0.2,
+          leverageCaps: { stock: 2, crypto: 20, fx: 40 },
           fees: { crypto: { commissionRate: 0.002 } },
           slippageBps: { crypto: 5 },
         },
       }),
     });
     const paramId = paramAccount.body?.account?.id;
-    check('POST /api/accounts accepts account settings', paramAccount.status === 201 && !!paramId,
+    check('POST /api/accounts accepts leverageCaps', paramAccount.status === 201 && !!paramId,
       `status=${paramAccount.status} ${JSON.stringify(paramAccount.body?.error || '')}`);
     if (paramId) {
       const paramSnap = (await api(`/api/accounts/${paramId}`)).body;
-      check('settings override leverage caps (multiplier 0.2 -> crypto 20x)',
-        paramSnap?.effective?.leverage?.crypto === 20 && paramSnap?.effective?.leverage?.fx === 40,
+      check('leverageCaps map to effective per-market ceilings',
+        paramSnap?.effective?.leverage?.crypto === 20
+          && paramSnap?.effective?.leverage?.fx === 40
+          && paramSnap?.effective?.leverage?.hk === 2
+          && paramSnap?.effective?.leverage?.cn === 1,
         `leverage=${JSON.stringify(paramSnap?.effective?.leverage)}`);
       check('settings override fees/slippage',
         paramSnap?.effective?.fees?.crypto?.commissionRate === 0.002
           && paramSnap?.effective?.slippageBps?.crypto === 5,
         `fee=${paramSnap?.effective?.fees?.crypto?.commissionRate} slip=${paramSnap?.effective?.slippageBps?.crypto}`);
 
+      const legacyPatch = await api(`/api/accounts/${paramId}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({ settings: { leverageMultiplier: 0.5 } }),
+      });
+      check('legacy leverageMultiplier is migrated onto the three caps',
+        legacyPatch.status === 200
+          && legacyPatch.body?.settings?.leverageCaps?.stock === 5
+          && legacyPatch.body?.settings?.leverageCaps?.crypto === 50
+          && legacyPatch.body?.settings?.leverageCaps?.fx === 100,
+        JSON.stringify(legacyPatch.body?.settings?.leverageCaps));
+
+      const mmrTooHigh = await api(`/api/accounts/${paramId}/settings`, {
+        method: 'PATCH',
+        body: JSON.stringify({ settings: { leverageCaps: { crypto: 500 }, margin: { mmr: { crypto: 0.01 } } } }),
+      });
+      check('maintenance margin above 0.9/cap is rejected with the limit',
+        mmrTooHigh.status === 400
+          && mmrTooHigh.body?.error?.code === 'SETTINGS_INVALID'
+          && String(mmrTooHigh.body?.error?.message || '').includes('最高'),
+        String(mmrTooHigh.body?.error?.message || '').slice(0, 90));
+
       const eth2 = (await api('/api/quotes?symbols=' + encodeURIComponent('crypto:ETHUSDT'))).body?.quotes?.[0];
       if (eth2 && eth2.price > 0) {
         const over = await api(`/api/accounts/${paramId}/orders`, {
           method: 'POST',
-          body: JSON.stringify({ symbol: 'crypto:ETHUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 21 }),
+          body: JSON.stringify({ symbol: 'crypto:ETHUSDT', side: 'buy', type: 'market', qty: 0.1, leverage: 51 }),
         });
         check('leverage above the account cap is rejected',
           over.status === 400 && over.body?.error?.code === 'LEVERAGE_NOT_ALLOWED',
@@ -388,7 +415,7 @@ async function main() {
 
         const riskLock = await api(`/api/accounts/${paramId}/settings`, {
           method: 'PATCH',
-          body: JSON.stringify({ settings: { leverageMultiplier: 1 } }),
+          body: JSON.stringify({ settings: { leverageCaps: { crypto: 100 } } }),
         });
         check('risk settings are locked while a position is open',
           riskLock.status === 409 && riskLock.body?.error?.code === 'SETTINGS_LOCKED',
@@ -402,6 +429,82 @@ async function main() {
           feePatch.status === 200 && feePatch.body?.settings?.fees?.crypto?.commissionRate === 0.0015,
           `status=${feePatch.status}`);
       }
+    }
+
+    // ---- v5 arbitrary FX pairs + USD settlement -----------------------------
+    const fxCurrencies = await api('/api/fx/currencies');
+    check('GET /api/fx/currencies lists the currency pool',
+      fxCurrencies.status === 200
+        && Array.isArray(fxCurrencies.body?.currencies)
+        && fxCurrencies.body.currencies.length >= 8
+        && fxCurrencies.body.currencies.some((c) => c.code === 'EUR')
+        && fxCurrencies.body.currencies.some((c) => c.code === 'JPY'),
+      `${fxCurrencies.body?.currencies?.length} currencies`);
+
+    const crossQuote = (await api('/api/quotes?symbols=fx:EURJPY,fx:USDHKD')).body;
+    const eurjpy = (crossQuote?.quotes || []).find((q) => q.symbol === 'fx:EURJPY');
+    check('cross FX quote carries base/quote and USD factors',
+      !!eurjpy
+        && eurjpy.baseCurrency === 'EUR'
+        && eurjpy.quoteCurrency === 'JPY'
+        && eurjpy.price > 0
+        && eurjpy.usdPerBase > 0
+        && eurjpy.usdPerQuote > 0,
+      eurjpy ? `price=${eurjpy.price} usdBase=${eurjpy.usdPerBase}` : JSON.stringify(crossQuote?.errors));
+
+    const crossKline = await api('/api/kline?symbol=fx:EURJPY&interval=1d&limit=10');
+    check('synthetic forex pair K-line is available',
+      crossKline.status === 200 && (crossKline.body?.bars || []).length >= 3,
+      `${(crossKline.body?.bars || []).length} bars`);
+
+    const fxSearch = await api('/api/search?q=eurjpy');
+    check('search finds arbitrary forex pairs',
+      fxSearch.status === 200 && (fxSearch.body?.results || []).some((r) => r.symbol === 'fx:EURJPY'),
+      `results=${(fxSearch.body?.results || []).length}`);
+
+    const fxAccount = await api('/api/accounts', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: '外汇测试账户',
+        initialCapital: 1000000,
+        settings: { leverageCaps: { stock: 20, crypto: 500, fx: 1000 } },
+      }),
+    });
+    const fxAccountId = fxAccount.body?.account?.id;
+    check('POST /api/accounts accepts max leverage caps',
+      fxAccount.status === 201 && !!fxAccountId && fxAccount.body?.account?.settings?.leverageCaps?.fx === 1000,
+      `status=${fxAccount.status}`);
+    if (fxAccountId && eurjpy) {
+      const tooMuch = await api(`/api/accounts/${fxAccountId}/orders`, {
+        method: 'POST',
+        body: JSON.stringify({ symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 1001 }),
+      });
+      check('fx leverage above the account cap is rejected',
+        tooMuch.status === 400 && tooMuch.body?.error?.code === 'LEVERAGE_NOT_ALLOWED',
+        `status=${tooMuch.status} code=${tooMuch.body?.error?.code}`);
+
+      const fxOpen = await api(`/api/accounts/${fxAccountId}/orders`, {
+        method: 'POST',
+        body: JSON.stringify({ symbol: 'fx:EURJPY', side: 'buy', type: 'market', qty: 1000, leverage: 1000 }),
+      });
+      const fxSnap = (await api(`/api/accounts/${fxAccountId}`)).body;
+      const fxPos = (fxSnap?.positions || []).find((p) => p.symbol === 'fx:EURJPY');
+      check('EUR/JPY opens with USD notional settlement',
+        fxOpen.status === 201
+          && !!fxPos
+          && fxPos.currency === 'USD'
+          && Number(fxPos.notionalUsd) > 0
+          && Math.abs(Number(fxPos.margin) - Number(fxPos.notionalUsd) / 1000) <= 0.02,
+        fxPos ? `notional=${fxPos.notionalUsd} margin=${fxPos.margin} leverage=${fxPos.leverage}` : `status=${fxOpen.status}`);
+
+      const fxClose = await api(`/api/accounts/${fxAccountId}/orders`, {
+        method: 'POST',
+        body: JSON.stringify({ symbol: 'fx:EURJPY', side: 'sell', type: 'market', close: true }),
+      });
+      check('EUR/JPY position closes through the USD model',
+        fxClose.status === 201 && Number.isFinite(Number(fxClose.body?.fill?.price)),
+        `status=${fxClose.status} price=${fxClose.body?.fill?.price}`);
+      await api(`/api/accounts/${fxAccountId}`, { method: 'DELETE' });
     }
 
     const equity = await api(`/api/accounts/${accountId}/equity?range=all`);
