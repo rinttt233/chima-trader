@@ -1,0 +1,14 @@
+{
+  "name": "chima-trader-android-tools",
+  "version": "1.4.0",
+  "private": true,
+  "description": "Build-time helpers: bundles the ChimaTrader Node server into the Android APK assets.",
+  "type": "module",
+  "scripts": {
+    "build:assets": "node build-node-assets.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "iconv-lite": "0.7.3"
+  }
+}

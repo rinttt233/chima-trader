@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="app_background">#FF0B0E13</color>
+    <color name="app_surface">#FF111827</color>
+    <color name="app_text">#FFE8EAED</color>
+    <color name="app_muted">#FF8A93A5</color>
+    <color name="app_accent">#FFE6B450</color>
+    <color name="icon_background">#FF0B0E13</color>
+</resources>

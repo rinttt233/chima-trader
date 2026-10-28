@@ -1,0 +1,15 @@
+# nodejs-mobile prebuilt libnode.so + headers are downloaded by CI (57 MB, never committed)
+app/libnode/
+
+# gradle / IDE output
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+captures/
+.cxx/
+
+# generated Node assets (tools/android/build-node-assets.mjs)
+app/src/main/assets/nodejs-project/

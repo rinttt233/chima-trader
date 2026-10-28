@@ -1,0 +1,5 @@
+// Top-level build file. The app module is plain Android (no AndroidX, no Kotlin)
+// and embeds the nodejs-mobile libnode.so runtime through CMake.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

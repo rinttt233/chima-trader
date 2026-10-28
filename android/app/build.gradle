@@ -1,0 +1,98 @@
+// ChimaTrader Android shell: a single WebView that talks to the Node server
+// embedded in the APK (nodejs-mobile 18.20.4, libnode.so via CMake).
+//
+// Signing: release builds are signed with the keystore provided by CI through
+// CHIMA_KEYSTORE* env vars so that every future build keeps the same certificate
+// (an APK update over a differently-signed APK would force a data-losing uninstall).
+plugins {
+    id 'com.android.application'
+}
+
+def keystorePath = System.getenv('CHIMA_KEYSTORE')
+def hasReleaseKeystore = keystorePath != null && !keystorePath.trim().isEmpty() && new File(keystorePath).isFile()
+
+android {
+    namespace 'com.chimatrader.app'
+    compileSdk 34
+    ndkVersion '26.1.10909125'
+
+    defaultConfig {
+        applicationId 'com.chimatrader.app'
+        minSdk 24
+        targetSdk 33
+        versionCode 1
+        versionName '1.4.0'
+
+        // Only mainstream 64-bit phones: keeps the APK (and libnode.so) small.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=c++_shared'
+                cppFlags '-std=c++17'
+            }
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            release {
+                storeFile file(keystorePath)
+                storePassword System.getenv('CHIMA_KEYSTORE_PASSWORD')
+                keyAlias System.getenv('CHIMA_KEY_ALIAS')
+                keyPassword System.getenv('CHIMA_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            // Fall back to debug signing for local builds without CI secrets.
+            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'CMakeLists.txt'
+        }
+    }
+
+    sourceSets {
+        main {
+            // nodejs-mobile prebuilt libraries (downloaded by CI into app/libnode).
+            jniLibs.srcDirs = ['libnode/bin/']
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Extract .so files at install time: libnode.so is dlopen'ed by the
+            // node runtime and needs a real filesystem path.
+            useLegacyPackaging = true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {
+    // Deliberately empty: framework WebView / Notification APIs only, no AndroidX,
+    // so the build has no third-party dependencies to resolve.
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">千亦所 ChimaTrader</string>
+
+    <string name="status_starting">正在启动本地服务…</string>
+    <string name="status_timeout">本地服务启动超时。\n请点击重试。</string>
+    <string name="status_load_failed">界面加载失败：%1$s</string>
+    <string name="status_service_failed">无法启动本地服务：%1$s</string>
+    <string name="retry">重试</string>
+
+    <string name="notification_channel_name">本地服务</string>
+    <string name="notification_channel_description">让本地行情与账户服务在后台持续运行</string>
+    <string name="notification_title">千亦所本地服务运行中</string>
+    <string name="notification_action_exit">退出</string>
+
+    <string name="choose_backup_file">选择备份文件</string>
+    <string name="no_file_chooser">没有可用的文件选择器</string>
+
+    <string name="download_description">千亦所账户备份</string>
+    <string name="download_started">已开始下载：%1$s\n保存位置：%2$s</string>
+    <string name="download_saved">已保存到：%1$s</string>
+    <string name="download_failed">下载失败，请重试</string>
+</resources>
