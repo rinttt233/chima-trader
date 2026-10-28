@@ -136,6 +136,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: chima-trader-android-apk
-          path: chima-trader-1.4.0-android-arm64.apk
+          path: chima-trader-${{ env.APP_VERSION }}-android-arm64.apk
           if-no-files-found: error
           retention-days: 30
