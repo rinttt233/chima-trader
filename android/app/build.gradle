@@ -20,8 +20,8 @@ android {
         applicationId 'com.chimatrader.app'
         minSdk 24
         targetSdk 33
-        versionCode 2
-        versionName '1.4.1'
+        versionCode 3
+        versionName '1.4.2'
 
         // Only mainstream 64-bit phones: keeps the APK (and libnode.so) small.
         ndk {

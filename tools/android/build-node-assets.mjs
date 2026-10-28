@@ -23,7 +23,7 @@ const shimIntl = path.join(scriptDir, 'shim-intl.mjs');
 const shimEncoding = path.join(scriptDir, 'shim-encoding.mjs');
 const mainTemplate = path.join(scriptDir, 'node-main.cjs');
 
-const APP_VERSION = '1.4.1';
+const APP_VERSION = '1.4.2';
 
 function log(...args) {
   console.log('[node-assets]', ...args);

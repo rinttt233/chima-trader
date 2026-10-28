@@ -4,10 +4,10 @@
 
 | 包 | 运行环境 | 说明 |
 |---|---|---|
-| `chima-trader-1.3.1-win7-x64-no-node.zip` | Windows 7 SP1+（64 位） | 自带 Node 12.22.12，双击 `start.cmd` 即用；也兼容 Win10/Win11 |
-| `chima-trader-1.3.1-win7-x86-no-node.zip` | Windows 7 SP1+（32 位） | 自带 32 位 Node 12.22.12 |
-| `chima-trader-1.3.1-linux-x64-glibc217.tar.gz` | Linux x86_64，glibc ≥ 2.17 | 自带 Node 16.20.2（官方 glibc-217 兼容构建），CentOS 7 / Ubuntu 16+ 等老系统可跑 |
-| `chima-trader-1.3.1-linux-arm64-glibc217.tar.gz` | Linux arm64，glibc ≥ 2.17 | 同上，面向 ARM 服务器/开发板 |
+| `chima-trader-1.4.2-win7-x64-no-node.zip` | Windows 7 SP1+（64 位） | 自带 Node 12.22.12，双击 `start.cmd` 即用；也兼容 Win10/Win11 |
+| `chima-trader-1.4.2-win7-x86-no-node.zip` | Windows 7 SP1+（32 位） | 自带 32 位 Node 12.22.12 |
+| `chima-trader-1.4.2-linux-x64-glibc217.tar.gz` | Linux x86_64，glibc ≥ 2.17 | 自带 Node 16.20.2（官方 glibc-217 兼容构建），CentOS 7 / Ubuntu 16+ 等老系统可跑 |
+| `chima-trader-1.4.2-linux-arm64-glibc217.tar.gz` | Linux arm64，glibc ≥ 2.17 | 同上，面向 ARM 服务器/开发板 |
 
 > 运行时版本说明：Windows 7 官方最后支持到 Node 12.22.12，这是能运行本应用的**最高**版本；Linux 选择 Node 16 官方 glibc-217 兼容构建，以兼容 CentOS 7 等 glibc 2.17 老系统。两者都已停止官方安全更新，**仅建议在本机/内网环境使用**；能升级系统的机器请优先用源码 + Node 20。
 
@@ -17,7 +17,7 @@
 
 ```powershell
 # Windows PowerShell 5+
-Get-FileHash .\chima-trader-1.3.1-win7-x64-no-node.zip -Algorithm SHA256
+Get-FileHash .\chima-trader-1.4.2-win7-x64-no-node.zip -Algorithm SHA256
 # 对比 SHA256SUMS.txt 中同名文件的值
 ```
 
@@ -41,7 +41,7 @@ sha256sum -c SHA256SUMS.txt --ignore-missing
 ## Linux 使用
 
 ```bash
-tar -xzf chima-trader-1.3.1-linux-x64-glibc217.tar.gz
+tar -xzf chima-trader-1.4.2-linux-x64-glibc217.tar.gz
 cd chima-trader
 chmod +x start.sh          # 解压工具可能丢失执行位
 ./start.sh                 # 前台运行；有桌面环境会尝试用 xdg-open 打开浏览器

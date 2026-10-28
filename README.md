@@ -9,7 +9,7 @@
 >
 > **下载即用**：前往 [Releases](https://github.com/rinttt233/chima-trader/releases) 下载最新版 `chima-trader-vX.Y.Z.zip`，解压后双击 `start.cmd`（需 Node.js ≥ 20）。
 >
-> **不需要 Node.js / 要在 Win7 或老 Linux 上跑**：下载便携包 `chima-trader-1.3.1-win7-x64-no-node.zip`、`...-linux-x64-glibc217.tar.gz` 等，运行时已内置，详见 [PORTABLE.md](PORTABLE.md)。
+> **不需要 Node.js / 要在 Win7 或老 Linux 上跑**：下载便携包 `chima-trader-1.4.2-win7-x64-no-node.zip`、`...-linux-x64-glibc217.tar.gz` 等，运行时已内置，详见 [PORTABLE.md](PORTABLE.md)。
 
 一个跑在自己电脑上的模拟交易平台：**行情接真实市场，资金完全是虚拟的**。不涉及任何真实货币交易，也不接入任何券商/交易所的下单通道（只读公开行情）。
 
@@ -29,10 +29,10 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 
 | 包 | 运行环境 | 运行时 |
 |---|---|---|
-| `chima-trader-1.3.1-win7-x64-no-node.zip` | Windows 7 SP1+ 64 位（也兼容 Win10/11） | 内置 Node 12.22.12 |
-| `chima-trader-1.3.1-win7-x86-no-node.zip` | Windows 7 SP1+ 32 位 | 内置 Node 12.22.12（x86） |
-| `chima-trader-1.3.1-linux-x64-glibc217.tar.gz` | Linux x86_64，glibc ≥ 2.17（CentOS 7 / Ubuntu 16+） | 内置 Node 16.20.2 |
-| `chima-trader-1.3.1-linux-arm64-glibc217.tar.gz` | Linux arm64，glibc ≥ 2.17 | 内置 Node 16.20.2 |
+| `chima-trader-1.4.2-win7-x64-no-node.zip` | Windows 7 SP1+ 64 位（也兼容 Win10/11） | 内置 Node 12.22.12 |
+| `chima-trader-1.4.2-win7-x86-no-node.zip` | Windows 7 SP1+ 32 位 | 内置 Node 12.22.12（x86） |
+| `chima-trader-1.4.2-linux-x64-glibc217.tar.gz` | Linux x86_64，glibc ≥ 2.17（CentOS 7 / Ubuntu 16+） | 内置 Node 16.20.2 |
+| `chima-trader-1.4.2-linux-arm64-glibc217.tar.gz` | Linux arm64，glibc ≥ 2.17 | 内置 Node 16.20.2 |
 
 - Windows：解压到英文路径 → 双击 `start.cmd`（自动启动并打开浏览器）；浏览器需 Chrome 109 / Firefox 115 ESR（Win7 最后支持版），IE 11 不支持。
 - Linux：`tar -xzf ...` → `chmod +x start.sh` → `./start.sh`（无桌面加 `--no-browser`）。
@@ -42,7 +42,7 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 
 ## Android APK（独立本地版）
 
-下载 `chima-trader-1.4.1-android-arm64.apk` 直接安装（Android 7+，arm64）：**APK 内置 Node 运行时，服务跑在手机本机 `127.0.0.1:8787`，不需要电脑/服务器，账户数据只存在应用私有目录，不上传、不同步**。
+下载 `chima-trader-1.4.2-android-arm64.apk` 直接安装（Android 7+，arm64）：**APK 内置 Node 运行时，服务跑在手机本机 `127.0.0.1:8787`，不需要电脑/服务器，账户数据只存在应用私有目录，不上传、不同步**。
 
 - 首次启动解压本地服务（约 5–30 秒）→ 自动进入界面；数据在 `Android/data/com.chimatrader.app/files/data/`，卸载会删除，请先导出备份
 - 权限仅 `INTERNET` + 前台服务/通知相关（`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`、`WAKE_LOCK`）；关闭系统云备份；无第三方 SDK

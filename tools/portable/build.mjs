@@ -39,7 +39,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------- constants
-const VERSION = '1.3.1';
+const VERSION = '1.4.2';
 const APP_DIR_NAME = 'chima-trader';
 const FRONTEND_FILES = ['app.js', 'charts.js', 'mock.js'];
 
@@ -224,6 +224,9 @@ def cmd_check(kind, archive, app_sha, node_sha):
                 "chima-trader/public/app.js",
                 "chima-trader/public/charts.js",
                 "chima-trader/public/mock.js",
+                "chima-trader/public/favicon.ico",
+                "chima-trader/chima-trader.ico",
+                "chima-trader/create-shortcut.cmd",
                 "chima-trader/data/.gitkeep",
             ]
             for name in required:
@@ -527,6 +530,13 @@ function writeStartCmd(dest) {
   fs.writeFileSync(dest, toCrlf(text), 'utf8');
 }
 
+function writeShortcutCmd(dest) {
+  const text = readAsset('create-shortcut.cmd');
+  const nonAscii = [...text].find((ch) => ch.charCodeAt(0) > 0x7f);
+  if (nonAscii) fail(`create-shortcut.cmd must be ASCII-only (found ${JSON.stringify(nonAscii)})`);
+  fs.writeFileSync(dest, toCrlf(text), 'utf8');
+}
+
 function writeStartSh(dest) {
   const text = readAsset('start.sh').replace(/\r\n/g, '\n');
   fs.writeFileSync(dest, text.endsWith('\n') ? text : `${text}\n`, 'utf8');
@@ -617,6 +627,8 @@ function stageWin(env, target, bundlePath, frontendDir) {
   fs.copyFileSync(runtime.nodeExe, path.join(pkgDir, 'runtime', 'node.exe'));
   fs.copyFileSync(runtime.license, path.join(pkgDir, 'runtime', 'LICENSE'));
   writeStartCmd(path.join(pkgDir, 'start.cmd'));
+  writeShortcutCmd(path.join(pkgDir, 'create-shortcut.cmd'));
+  fs.copyFileSync(path.join(ROOT, 'chima-trader.ico'), path.join(pkgDir, 'chima-trader.ico'));
   writeReadmeWin(path.join(pkgDir, 'README-PORTABLE.txt'));
 
   const nodeExe = path.join(pkgDir, 'runtime', 'node.exe');
