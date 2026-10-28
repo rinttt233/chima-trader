@@ -1472,11 +1472,7 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   try {
-    if (url.pathname === '/favicon.ico') {
-      res.writeHead(204);
-      res.end();
-      return;
-    }
+    // favicon.ico is served by the static handler below (public/favicon.ico).
     if (url.pathname.startsWith('/api/')) {
       for (const r of routes) {
         if (r.method !== req.method) continue;
