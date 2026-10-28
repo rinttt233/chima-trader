@@ -8,6 +8,8 @@
 > 千亦所 ChimaTrader（简称 **ChimaTrader**）— 开源、可离线运行的模拟交易终端。零第三方依赖，数据全部来自公开只读行情接口。
 >
 > **下载即用**：前往 [Releases](https://github.com/rinttt233/chima-trader/releases) 下载最新版 `chima-trader-vX.Y.Z.zip`，解压后双击 `start.cmd`（需 Node.js ≥ 20）。
+>
+> **不需要 Node.js / 要在 Win7 或老 Linux 上跑**：下载便携包 `chima-trader-1.3.1-win7-x64-no-node.zip`、`...-linux-x64-glibc217.tar.gz` 等，运行时已内置，详见 [PORTABLE.md](PORTABLE.md)。
 
 一个跑在自己电脑上的模拟交易平台：**行情接真实市场，资金完全是虚拟的**。不涉及任何真实货币交易，也不接入任何券商/交易所的下单通道（只读公开行情）。
 
@@ -22,6 +24,21 @@
 node server.mjs           # 或者手动启动，浏览器打开 http://127.0.0.1:8787
 node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP 冒烟）
 ```
+
+## 免安装便携版（Win7 / Linux）
+
+| 包 | 运行环境 | 运行时 |
+|---|---|---|
+| `chima-trader-1.3.1-win7-x64-no-node.zip` | Windows 7 SP1+ 64 位（也兼容 Win10/11） | 内置 Node 12.22.12 |
+| `chima-trader-1.3.1-win7-x86-no-node.zip` | Windows 7 SP1+ 32 位 | 内置 Node 12.22.12（x86） |
+| `chima-trader-1.3.1-linux-x64-glibc217.tar.gz` | Linux x86_64，glibc ≥ 2.17（CentOS 7 / Ubuntu 16+） | 内置 Node 16.20.2 |
+| `chima-trader-1.3.1-linux-arm64-glibc217.tar.gz` | Linux arm64，glibc ≥ 2.17 | 内置 Node 16.20.2 |
+
+- Windows：解压到英文路径 → 双击 `start.cmd`（自动启动并打开浏览器）；浏览器需 Chrome 109 / Firefox 115 ESR（Win7 最后支持版），IE 11 不支持。
+- Linux：`tar -xzf ...` → `chmod +x start.sh` → `./start.sh`（无桌面加 `--no-browser`）。
+- 数据、备份、代理、端口等说明见 **[PORTABLE.md](PORTABLE.md)**；源码构建方法也在其中。
+
+> 便携包的运行时（Node 12 / Node 16）是为兼容 Win7、CentOS 7 等老系统而选取的已停止安全更新的版本，建议仅在本机/内网使用；能升级系统的机器请用源码 + Node 20。
 
 ---
 

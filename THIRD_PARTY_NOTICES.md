@@ -9,6 +9,18 @@
 - 版权：Copyright (c) 2024 TradingView, Inc.
 - 说明：源码文件头部已保留原始 license 头信息，未做修改。
 
+## iconv-lite（仅便携版）
+
+- 用途：便携包构建时把 `iconv-lite` 打包进 `app.mjs`，为老运行时（Node 12）提供 GBK 解码（腾讯/新浪行情中文名）。
+- 许可：MIT — https://github.com/ashtuchkin/iconv-lite
+- 说明：源码运行（Node ≥ 20）直接使用内置 TextDecoder，不依赖该包；它只出现在 `tools/portable/build.mjs` 打出的便携包里。
+
+## Node.js 运行时（仅便携版）
+
+- 文件：Windows 包 `runtime/node.exe`、Linux 包 `runtime/bin/node`，随包附带 `runtime/LICENSE`。
+- 版本：Windows 12.22.12（Win7 最后支持版本）、Linux 16.20.2（glibc-217 兼容构建）。
+- 许可：Node.js 采用 MIT 风格许可并包含第三方组件许可，详见随包 `runtime/LICENSE`。
+
 ## 行情数据来源
 
 本项目仅通过各数据源公开的只读行情接口获取数据，未使用其私有 API 或 SDK：
