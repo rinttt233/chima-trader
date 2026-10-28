@@ -40,6 +40,16 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 
 > 便携包的运行时（Node 12 / Node 16）是为兼容 Win7、CentOS 7 等老系统而选取的已停止安全更新的版本，建议仅在本机/内网使用；能升级系统的机器请用源码 + Node 20。
 
+## Android APK（独立本地版）
+
+下载 `chima-trader-1.4.0-android-arm64.apk` 直接安装（Android 7+，arm64）：**APK 内置 Node 运行时，服务跑在手机本机 `127.0.0.1:8787`，不需要电脑/服务器，账户数据只存在应用私有目录，不上传、不同步**。
+
+- 首次启动解压本地服务（约 5–30 秒）→ 自动进入界面；数据在 `Android/data/com.chimatrader.app/files/data/`，卸载会删除，请先导出备份
+- 权限仅 `INTERNET` + 前台服务/通知相关（`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`、`WAKE_LOCK`）；关闭系统云备份；无第三方 SDK
+- 已知限制：仅 arm64、Android 7+；后台依赖前台服务常驻通知（通知栏「退出」才真正停止，建议加电池白名单）；手机无代理时美股/外汇分钟线不可用；16KB 页设备可能不兼容（libnode 为 4KB 对齐）
+
+安装、隐私、备份、构建方式和限制详见 **[ANDROID.md](ANDROID.md)**。
+
 ---
 
 ## 一分钟上手
