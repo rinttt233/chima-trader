@@ -17,7 +17,7 @@
 
 ![主界面](docs/screenshot.png)
 
-> 更多界面：新手引导 [docs/onboarding.png](docs/onboarding.png) ｜ 全市场标的库 [docs/universe.png](docs/universe.png) ｜ 杠杆与风险预警 [docs/risk.png](docs/risk.png) ｜ 账户参数设置 [docs/account-settings.png](docs/account-settings.png) ｜ 数据管理 [docs/backup.png](docs/backup.png) ｜ 数据源状态 [docs/data-source-status.png](docs/data-source-status.png) ｜ 杠杆上限 [docs/account-caps.png](docs/account-caps.png) ｜ 任意外汇对 [docs/fx-pair.png](docs/fx-pair.png)
+> 更多界面：新手引导 [docs/onboarding.png](docs/onboarding.png) ｜ 全市场标的库 [docs/universe.png](docs/universe.png) ｜ 杠杆与风险预警 [docs/risk.png](docs/risk.png) ｜ 账户参数设置 [docs/account-settings.png](docs/account-settings.png) ｜ 数据管理 [docs/backup.png](docs/backup.png) ｜ 数据源状态 [docs/data-source-status.png](docs/data-source-status.png) ｜ 杠杆上限 [docs/account-caps.png](docs/account-caps.png) ｜ 任意外汇对 [docs/fx-pair.png](docs/fx-pair.png) ｜ 图标 [docs/icon.png](docs/icon.png)
 
 ```
 双击 start.cmd            # Windows 一键启动（自动打开浏览器）
@@ -42,7 +42,7 @@ node selfcheck.mjs        # 全链路自检（离线单测 + 联网行情 + HTTP
 
 ## Android APK（独立本地版）
 
-下载 `chima-trader-1.4.0-android-arm64.apk` 直接安装（Android 7+，arm64）：**APK 内置 Node 运行时，服务跑在手机本机 `127.0.0.1:8787`，不需要电脑/服务器，账户数据只存在应用私有目录，不上传、不同步**。
+下载 `chima-trader-1.4.1-android-arm64.apk` 直接安装（Android 7+，arm64）：**APK 内置 Node 运行时，服务跑在手机本机 `127.0.0.1:8787`，不需要电脑/服务器，账户数据只存在应用私有目录，不上传、不同步**。
 
 - 首次启动解压本地服务（约 5–30 秒）→ 自动进入界面；数据在 `Android/data/com.chimatrader.app/files/data/`，卸载会删除，请先导出备份
 - 权限仅 `INTERNET` + 前台服务/通知相关（`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`、`WAKE_LOCK`）；关闭系统云备份；无第三方 SDK

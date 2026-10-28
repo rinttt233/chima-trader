@@ -6,7 +6,7 @@
 
 从 [Releases](https://github.com/rinttt233/chima-trader/releases) 下载：
 
-- `chima-trader-1.4.0-android-arm64.apk`（约几十 MB，arm64 手机）
+- `chima-trader-1.4.1-android-arm64.apk`（约几十 MB，arm64 手机）
 
 安装：
 
